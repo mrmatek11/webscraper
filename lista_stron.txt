@@ -1,0 +1,13 @@
+# Lista stron do zapisania (jeden URL na linię)
+# Linie zaczynające się od # są ignorowane
+
+# List of all pages [1 url per line]
+# Lines with "#" in front off address will be ignored
+# enjoy
+
+https://ecomess.pl/produkty/picoflux-air/
+https://ecomess.pl/produkty/antena-mbwblue/
+https://ecomess.pl/produkty/ecors3/
+https://ecomess.pl/produkty/sensostar-e/
+https://ecomess.pl/kategorie/odczyt-zdalny/
+# https://ta-strona-jest-wylaczona.pl
