@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
-snap.py — Web Snapshot Tool
---mode full              : rendered HTML + assets + screenshots -> ZIP per domain
---mode screenshots       : screenshots only -> flat ZIP, files named by domain+date
---mode clean-full        : aggressive popup nuke, then HTML + assets + screenshots
---mode clean-screenshots : aggressive popup nuke, then screenshots only
-
-Requirements:
-    pip install playwright requests
-    playwright install chromium
+snap.py — Web Snapshot Tool (Wersja 1:1 + Fix na Lazy Load obrazków)
 """
 
 import argparse
@@ -19,7 +11,7 @@ import zipfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urldefrag
 
 import requests
 
@@ -35,11 +27,28 @@ BANNER = r"""
       ░           ░       ░  ░
   [ web snapshot tool ]  by snap.py
   ──────────────────────────────────────
-  --mode full                HTML + assets + screenshots
-  --mode screenshots         screenshots only  (fast)
-  --mode clean-full          nuke popups, then full
-  --mode clean-screenshots   nuke popups, then screenshots
 """
+
+ASSET_EXTENSIONS = {
+    '.css', '.js',
+    '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif', '.ico',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+    '.mp4', '.webm', '.ogg', '.mp3',
+    '.json',
+}
+
+CONTENT_TYPE_MAP = {
+    'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+    'image/webp': '.webp', 'image/avif': '.avif', 'image/svg+xml': '.svg',
+    'image/x-icon': '.ico', 'image/vnd.microsoft.icon': '.ico',
+    'font/woff': '.woff', 'font/woff2': '.woff2', 'font/ttf': '.ttf',
+    'font/otf': '.otf', 'application/font-woff': '.woff',
+    'application/font-woff2': '.woff2', 'application/x-font-ttf': '.ttf',
+    'text/css': '.css', 'application/javascript': '.js', 'text/javascript': '.js',
+    'application/json': '.json',
+}
+
+NORMAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -47,10 +56,8 @@ BANNER = r"""
 def sanitize_name(name: str) -> str:
     return re.sub(r'[^\w\-.]', '_', name).strip('_')
 
-
 def get_domain(url: str) -> str:
     return urlparse(url).netloc.replace('www.', '')
-
 
 def get_subfolder_name(url: str) -> str:
     path = urlparse(url).path.strip('/')
@@ -59,10 +66,8 @@ def get_subfolder_name(url: str) -> str:
     name = sanitize_name(path.replace('/', '_'))
     return name[:80]
 
-
 def get_zip_name(domain: str) -> str:
     return f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}_{sanitize_name(domain)}.zip"
-
 
 def get_screenshot_filename(url: str) -> str:
     domain = get_domain(url)
@@ -73,75 +78,36 @@ def get_screenshot_filename(url: str) -> str:
         name += f"_{sub}"
     return f"{name}.png"
 
+def url_to_local_path(asset_url: str, assets_dir: Path, fname_counts: dict, content_type: str = ""):
+    parsed = urlparse(asset_url)
+    path_part = parsed.path.rstrip('/')
+    base = Path(path_part).name or 'asset'
+    base = sanitize_name(base).split('?')[0] or 'asset'
 
-# ─── html + assets ────────────────────────────────────────────────────────────
+    if not Path(base).suffix:
+        guessed_ext = '.bin'
+        for ct_key, ct_ext in CONTENT_TYPE_MAP.items():
+            if ct_key in content_type:
+                guessed_ext = ct_ext
+                break
+        base += guessed_ext
 
-def save_html_with_assets(html_content: str, url: str, output_dir: Path, session: requests.Session) -> bool:
-    assets_dir = output_dir / 'assets'
-    assets_dir.mkdir(exist_ok=True)
+    key = base
+    if key in fname_counts:
+        fname_counts[key] += 1
+        stem = Path(base).stem
+        ext = Path(base).suffix
+        base = f"{stem}_{fname_counts[key]}{ext}"
+    else:
+        fname_counts[key] = 0
 
-    patterns = [
-        (r'href=["\']([^"\']+\.css[^"\']*)["\']', 'css'),
-        (r'<script[^>]*src=["\']([^"\']+\.js[^"\']*)["\']', 'js'),
-        (r'<img[^>]*src=["\']([^"\']+\.(png|jpg|jpeg|gif|svg|webp|avif|ico)[^"\']*)["\']', 'img'),
-        (r'<[^>]*data-src=["\']([^"\']+\.(png|jpg|jpeg|gif|svg|webp|avif)[^"\']*)["\']', 'img'),
-        (r'<[^>]*data-bg=["\']([^"\']+\.(png|jpg|jpeg|gif|svg|webp|avif)[^"\']*)["\']', 'img'),
-        (r'url\(["\']?([^"\')\s]+\.(png|jpg|jpeg|gif|svg|webp|woff2?|ttf|eot|otf)[^"\')\s]*)["\']?\)', 'asset'),
-    ]
-
-    srcset_urls = set()
-    for match in re.finditer(r'<[^>]*srcset=["\']([^"\']+)["\']', html_content, re.IGNORECASE):
-        for part in match.group(1).split(','):
-            src = part.strip().split(' ')[0]
-            if src and not src.startswith('data:'):
-                srcset_urls.add(src)
-
-    downloaded = {}
-    for pattern, asset_type in patterns:
-        for match in re.finditer(pattern, html_content, re.IGNORECASE):
-            raw = match.group(1)
-            if raw.startswith('data:'):
-                continue
-            if raw.startswith('//'):
-                raw = 'https:' + raw
-            full = urljoin(url, raw)
-            if full not in downloaded:
-                downloaded[full] = (asset_type, raw)
-
-    for src in srcset_urls:
-        if src.startswith('//'):
-            src = 'https:' + src
-        full = urljoin(url, src)
-        if full not in downloaded:
-            downloaded[full] = ('img', src)
-
-    saved = {}
-    for asset_url, (asset_type, _) in downloaded.items():
-        try:
-            r = session.get(asset_url, timeout=15)
-            r.raise_for_status()
-            fname = sanitize_name(Path(urlparse(asset_url).path).name) or f'asset_{len(saved)}'
-            if not Path(fname).suffix:
-                fname += f'.{asset_type}'
-            (assets_dir / fname).write_bytes(r.content)
-            saved[asset_url] = f'assets/{fname}'
-            raw_path = urlparse(asset_url).path
-            if raw_path:
-                html_content = html_content.replace(raw_path, f'assets/{fname}')
-        except requests.RequestException:
-            pass
-
-    for orig, local in saved.items():
-        html_content = html_content.replace(orig, local)
-
-    (output_dir / 'index.html').write_text(html_content, encoding='utf-8', errors='replace')
-    return True
+    abs_path = assets_dir / base
+    return f"assets/{base}", abs_path
 
 
 # ─── popup killing ────────────────────────────────────────────────────────────
 
 def inject_anti_popup_css(page):
-    """Inject CSS that prevents popups from ever becoming visible."""
     try:
         page.evaluate("""
             () => {
@@ -150,8 +116,7 @@ def inject_anti_popup_css(page):
                 style.id = '__snap_anti_popup__';
                 style.textContent = `
                     .modal-backdrop { display: none !important; }
-                    #cookies_message_modal { display: none !important; }
-                    #cookies_message { display: none !important; }
+                    #cookies_message_modal, #cookies_message { display: none !important; }
                     [id*="cookie-banner"], [class*="cookie-banner"],
                     [id*="cookiebar"], [class*="cookiebar"],
                     [id*="cookie-notice"], [class*="cookie-notice"],
@@ -181,10 +146,7 @@ def inject_anti_popup_css(page):
     except Exception:
         pass
 
-
 def close_popups(page):
-    """Dismiss popups/modals — single pass."""
-    # ── Phase 1: click dismiss/accept/deny buttons ───────────────────────
     dismiss_selectors = [
         '#cookies-close-deny', '#cookies-close-accept', '#cookies-close-settings',
         '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
@@ -221,7 +183,6 @@ def close_popups(page):
         except Exception:
             pass
 
-    # ── Phase 2: Escape ×3 for stacked modals ───────────────────────────
     for _ in range(3):
         try:
             page.keyboard.press('Escape')
@@ -229,7 +190,6 @@ def close_popups(page):
         except Exception:
             pass
 
-    # ── Phase 3: nuclear JS ──────────────────────────────────────────────
     try:
         page.evaluate("""
             () => {
@@ -262,17 +222,12 @@ def close_popups(page):
     except Exception:
         pass
 
-
 def close_popups_aggressive(page):
-    """Multi-pass aggressive popup removal with CSS shielding."""
     inject_anti_popup_css(page)
-
     for attempt in range(4):
         close_popups(page)
         if attempt < 3:
             page.wait_for_timeout(1500)
-
-    # final nuclear sweep
     try:
         page.evaluate("""
             () => {
@@ -285,7 +240,6 @@ def close_popups_aggressive(page):
                 document.body.style.overflow = '';
                 document.body.style.paddingRight = '';
                 document.documentElement.style.overflow = '';
-                // kill ANY remaining fixed/absolute overlay with high z-index
                 document.querySelectorAll('*').forEach(el => {
                     const s = window.getComputedStyle(el);
                     if (s.position !== 'fixed' && s.position !== 'absolute') return;
@@ -300,19 +254,20 @@ def close_popups_aggressive(page):
         pass
 
 
-# ─── navigation + processing ──────────────────────────────────────────────────
+# ─── navigation helpers ───────────────────────────────────────────────────────
 
-def scroll_and_wait(page):
+def _scroll_and_wait(page):
     try:
         page.evaluate("""
             async () => {
                 await new Promise(resolve => {
                     let total = 0;
                     const step = 300;
+                    const dist = document.body.scrollHeight;
                     const timer = setInterval(() => {
                         window.scrollBy(0, step);
                         total += step;
-                        if (total >= document.body.scrollHeight) {
+                        if (total >= dist) {
                             clearInterval(timer);
                             window.scrollTo(0, 0);
                             resolve();
@@ -325,11 +280,100 @@ def scroll_and_wait(page):
     except Exception:
         pass
 
+def _force_lazy_load(page):
+    """Brutalnie wymusza załadowanie obrazków typu data-lazy-src (LiteSpeed, WP Rocket itp.)"""
+    try:
+        page.evaluate("""
+            () => {
+                // Wymuszenie dla LiteSpeed Cache / WP Rocket (data-lazy-src)
+                document.querySelectorAll('img[data-lazy-src]').forEach(img => {
+                    img.src = img.getAttribute('data-lazy-src');
+                    if (img.getAttribute('data-lazy-srcset')) {
+                        img.srcset = img.getAttribute('data-lazy-srcset');
+                    }
+                    if (img.getAttribute('data-lazy-sizes')) {
+                        img.sizes = img.getAttribute('data-lazy-sizes');
+                    }
+                    img.classList.remove('lazyloading', 'lazyload');
+                    img.classList.add('lazyloaded');
+                });
+                
+                // Wymuszenie dla natywnego lazy loading (loading="lazy")
+                document.querySelectorAll('img[loading="lazy"]').forEach(img => {
+                    img.loading = 'eager';
+                });
+            }
+        """)
+        page.wait_for_timeout(500) # Czekamy ułamek sekundy aż przeglądarka zacznie pobierać prawdziwe pliki
+    except Exception:
+        pass
 
-def goto_page(page, url: str) -> bool:
+def _force_slider_render(page):
+    """Przesuwa Flickity slajdy jeden po drugim, wymuszając lazy-load każdego zdjęcia."""
+    try:
+        page.wait_for_function("""
+            () => typeof window.Flickity !== 'undefined' ||
+                  document.querySelector('.flickity-enabled') !== null
+        """, timeout=8000)
+    except Exception:
+        pass
+
+    try:
+        page.evaluate("""
+            () => {
+                const carousels = document.querySelectorAll('.deeper-carousel-box');
+                carousels.forEach(carousel => {
+                    const items = carousel.querySelectorAll('.deeper-fancy-image');
+                    const count = items.length;
+                    if (!count) return;
+
+                    const flkty = window.Flickity && window.Flickity.data
+                        ? window.Flickity.data(carousel)
+                        : null;
+
+                    for (let i = 0; i < count; i++) {
+                        if (flkty) flkty.select(i, false, true);
+
+                        items[i].querySelectorAll('img[data-lazy-src], img[src*="svg+xml"]').forEach(img => {
+                            const real = img.getAttribute('data-lazy-src');
+                            if (real) {
+                                img.src = real;
+                                img.classList.remove('lazyloading', 'lazyload');
+                                img.classList.add('lazyloaded');
+                            }
+                        });
+                    }
+
+                    if (flkty) flkty.select(0, false, true);
+                });
+            }
+        """)
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+def _wait_for_images(page, timeout=5000):
+    try:
+        page.wait_for_function("""
+            () => {
+                const images = Array.from(document.querySelectorAll('img'));
+                return images.length === 0 || images.every(img => img.complete);
+            }
+        """, timeout=timeout)
+    except Exception:
+        pass
+
+def _wait_for_fonts(page):
+    try:
+        page.evaluate("async () => { await document.fonts.ready; }")
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+def _set_consent_cookies(context, url: str):
     try:
         domain = urlparse(url).netloc
-        consent_cookies = [
+        names = [
             'cookies_message_bar_hidden',
             'cookie_consent', 'cookie_accepted', 'cookies_accepted',
             'cookieconsent_status', 'CookieConsent', 'cc_cookie_accept',
@@ -337,13 +381,20 @@ def goto_page(page, url: str) -> bool:
             'cookies_google_analytics', 'cookies_google_targeting',
             'cookies_google_personalization', 'cookies_google_user_data',
         ]
-        page.context.add_cookies([
-            {'name': name, 'value': 'true', 'domain': domain, 'path': '/'}
-            for name in consent_cookies
+        context.add_cookies([
+            {'name': n, 'value': 'true', 'domain': domain, 'path': '/'}
+            for n in names
         ])
     except Exception:
         pass
 
+def _do_cleanup(page, aggressive: bool):
+    if aggressive:
+        close_popups_aggressive(page)
+    else:
+        close_popups(page)
+
+def _navigate(page, url: str) -> bool:
     try:
         page.goto(url, wait_until='networkidle', timeout=60000)
         return True
@@ -356,47 +407,209 @@ def goto_page(page, url: str) -> bool:
             return False
 
 
-def _do_cleanup(page, aggressive: bool):
-    """Run popup cleanup (normal or aggressive)."""
-    if aggressive:
-        close_popups_aggressive(page)
-    else:
-        close_popups(page)
+# ─── asset capture via network interception ───────────────────────────────────
+
+def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict):
+    def handle_response(response):
+        try:
+            req_url, _ = urldefrag(response.url)
+            if req_url in captured:
+                return
+            if response.request.resource_type == 'document':
+                return
+            if response.status < 200 or response.status >= 400:
+                return
+
+            content_type = response.headers.get('content-type', '').lower()
+            parsed_path = urlparse(req_url).path
+            ext = Path(parsed_path).suffix.lower()
+            rt = response.request.resource_type
+
+            is_media_ct = any(t in content_type for t in ('image/', 'font/', 'text/css', 'javascript', 'audio/', 'video/'))
+            
+            if ext not in ASSET_EXTENSIONS and rt not in ('stylesheet', 'script', 'image', 'font', 'media') and not is_media_ct:
+                return
+
+            body = response.body()
+            if not body:
+                return
+
+            local_rel, abs_path = url_to_local_path(req_url, assets_dir, fname_counts, content_type)
+            abs_path.write_bytes(body)
+            captured[req_url] = local_rel
+            
+            if response.url != req_url:
+                captured[response.url] = local_rel
+
+        except Exception:
+            pass
+
+    return handle_response
 
 
-def process_full(url: str, page, session, output_dir: Path, aggressive: bool = False) -> tuple:
-    if not goto_page(page, url):
-        return False, False
-    _do_cleanup(page, aggressive)
-    scroll_and_wait(page)
-    _do_cleanup(page, aggressive)
-    html_ok = False
-    shot_ok = False
+def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
+    if not captured:
+        return html
+
+    if '<base ' not in html.lower():
+        html = html.replace('<head>', '<head>\n<base href=".">', 1)
+
+    rewrites = {}
+
+    for asset_url, local_rel in captured.items():
+        rewrites[asset_url] = local_rel
+        p = urlparse(asset_url)
+        proto_rel = '//' + p.netloc + p.path + ('?' + p.query if p.query else '')
+        if proto_rel not in rewrites:
+            rewrites[proto_rel] = local_rel
+        path_only = p.path
+        if path_only and path_only not in rewrites:
+            rewrites[path_only] = local_rel
+        path_q = p.path + ('?' + p.query if p.query else '')
+        if path_q and path_q not in rewrites:
+            rewrites[path_q] = local_rel
+
+    for original in sorted(rewrites, key=len, reverse=True):
+        local = rewrites[original]
+        if not original or original == local:
+            continue
+        escaped = re.escape(original)
+        
+        html = re.sub(
+            r'((?:src|href|data-src|data-bg|poster|content)\s*=\s*["\'])(' + escaped + r')(["\'])',
+            r'\g<1>' + local + r'\3',
+            html,
+            flags=re.IGNORECASE
+        )
+        
+        html = re.sub(
+            r'(url\(\s*["\']?)(' + escaped + r')(["\']?\s*\))',
+            r'\g<1>' + local + r'\3',
+            html,
+            flags=re.IGNORECASE
+        )
+
+    return html
+
+def _convert_blobs_to_base64(page):
     try:
-        html_ok = save_html_with_assets(page.content(), url, output_dir, session)
+        page.evaluate("""
+            async () => {
+                const images = document.querySelectorAll('img[src^="blob:"]');
+                for (const img of images) {
+                    try {
+                        const response = await fetch(img.src);
+                        const blob = await response.blob();
+                        const reader = new FileReader();
+                        const base64 = await new Promise((resolve) => {
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        });
+                        img.src = base64;
+                    } catch (e) {
+                        console.error('Failed to convert blob img', e);
+                    }
+                }
+                
+                const elements = document.querySelectorAll('[style*="blob:"]');
+                elements.forEach(el => {
+                    let style = el.getAttribute('style');
+                    style = style.replace(/url\(["']?blob:[^"'\)]+["']?\)/g, (match) => {
+                        return 'url(none)';
+                    });
+                    el.setAttribute('style', style);
+                });
+            }
+        """)
     except Exception:
         pass
+
+
+# ─── process functions ────────────────────────────────────────────────────────
+
+def process_full(url: str, context, output_dir: Path, aggressive: bool = False) -> tuple:
+    assets_dir = output_dir / 'assets'
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    captured = {}
+    fname_counts = {}
+
+    _set_consent_cookies(context, url)
+    page = context.new_page()
+    page.on('response', _make_response_handler(assets_dir, captured, fname_counts))
+
+    if not _navigate(page, url):
+        page.close()
+        return False, False
+
+    _do_cleanup(page, aggressive)
+    _scroll_and_wait(page)
+    
+    # NOWOŚĆ: Wymuszamy podmianę data-lazy-src na src zanim sprawdzimy czy obrazki się załadowały
+    _force_lazy_load(page)
+    _force_slider_render(page)
+    
+    _do_cleanup(page, aggressive)
+    _wait_for_images(page)
+    _wait_for_fonts(page)
+
+    try:
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+    _convert_blobs_to_base64(page)
+
+    html_ok = False
+    try:
+        html = page.content()
+        html = _rewrite_html(html, captured, url)
+        (output_dir / 'index.html').write_text(html, encoding='utf-8', errors='replace')
+        unique_assets = len(set(captured.values()))
+        print(f"   assets: {unique_assets} files saved")
+        html_ok = True
+    except Exception as e:
+        print(f"   [HTML ERR] {e}")
+
+    shot_ok = False
     try:
         page.screenshot(path=str(output_dir / 'screenshot_full.png'), full_page=True)
         shot_ok = True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"   [SHOT ERR] {e}")
+
+    page.close()
     return html_ok, shot_ok
 
 
-def process_screenshot_only(url: str, page, output_path: Path, aggressive: bool = False) -> bool:
-    if not goto_page(page, url):
+def process_screenshot_only(url: str, context, output_path: Path, aggressive: bool = False) -> bool:
+    _set_consent_cookies(context, url)
+    page = context.new_page()
+
+    if not _navigate(page, url):
+        page.close()
         return False
+
     _do_cleanup(page, aggressive)
-    scroll_and_wait(page)
+    _scroll_and_wait(page)
+    
+    # NOWOŚĆ: To samo dla screenów
+    _force_lazy_load(page)
+    _force_slider_render(page)
+    
     _do_cleanup(page, aggressive)
+    _wait_for_images(page)
+    _wait_for_fonts(page)
+
     try:
         page.screenshot(path=str(output_path), full_page=True)
         kb = output_path.stat().st_size // 1024
         print(f"   saved  {output_path.name}  ({kb} KB)")
+        page.close()
         return True
     except Exception as e:
         print(f"   [SHOT ERR] {e}")
+        page.close()
         return False
 
 
@@ -409,7 +622,6 @@ def pack_dir_to_zip(src_dir: Path, zip_path: Path):
                 zf.write(f, f.relative_to(src_dir.parent))
     mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"  [ZIP]  {zip_path.name}  ({mb:.1f} MB)")
-
 
 def pack_files_to_zip(files: list, zip_path: Path):
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -424,13 +636,6 @@ def pack_files_to_zip(files: list, zip_path: Path):
 def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
     normalized = [u if u.startswith(('http://', 'https://')) else 'https://' + u for u in urls]
 
-    session = requests.Session()
-    session.headers.update({'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/125.0.0.0 Safari/537.36'
-    )})
-
     try:
         from playwright.sync_api import sync_playwright
         pw = sync_playwright().start()
@@ -439,20 +644,10 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
         print("[!] Playwright not installed.")
         sys.exit(1)
 
-    # resolve mode + aggressive flag
     aggressive = mode.startswith('clean-')
-    effective = mode.replace('clean-', '', 1)  # 'full' or 'screenshots'
-
+    effective = mode.replace('clean-', '', 1)
     mode_label = f"CLEAN + {effective.upper()}" if aggressive else effective.upper()
 
-    session = requests.Session()
-    session.headers.update({'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/125.0.0.0 Safari/537.36'
-    )})
-
-    # ── screenshots only ──────────────────────────────────────────────────
     if effective == 'screenshots':
         print(f"\n  mode  : {mode_label}")
         print(f"  pages : {len(normalized)}\n")
@@ -473,9 +668,13 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
                 fname = get_screenshot_filename(url)
                 out_path = tmp_dir / fname
                 print(f"      >> {url}")
-                page = browser.new_page(viewport={'width': 1440, 'height': 900})
-                success = process_screenshot_only(url, page, out_path, aggressive=aggressive)
-                page.close()
+                ctx = browser.new_context(
+                    viewport={'width': 1440, 'height': 900},
+                    bypass_csp=True,
+                    user_agent=NORMAL_USER_AGENT
+                )
+                success = process_screenshot_only(url, ctx, out_path, aggressive=aggressive)
+                ctx.close()
                 if success:
                     domain_shots.append(out_path)
                     ok += 1
@@ -489,7 +688,6 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
         shutil.rmtree(tmp_dir)
         print(f"\n  done  : {ok} ok  /  {fail} failed")
 
-    # ── full mode ─────────────────────────────────────────────────────────
     else:
         by_domain = defaultdict(list)
         for url in normalized:
@@ -515,9 +713,15 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
                     encoding='utf-8'
                 )
                 print(f"      -> {sub}/", end='  ')
-                page = browser.new_page(viewport={'width': 1440, 'height': 900})
-                html_ok, shot_ok = process_full(url, page, session, page_dir, aggressive=aggressive)
-                page.close()
+
+                ctx = browser.new_context(
+                    viewport={'width': 1440, 'height': 900},
+                    bypass_csp=True,
+                    user_agent=NORMAL_USER_AGENT
+                )
+                html_ok, shot_ok = process_full(url, ctx, page_dir, aggressive=aggressive)
+                ctx.close()
+
                 print('[OK]' if (html_ok or shot_ok) else '[FAIL]')
 
             pack_dir_to_zip(domain_tmp, zip_path)
@@ -527,7 +731,6 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
     browser.close()
     pw.stop()
 
-    # ── summary ───────────────────────────────────────────────────────────
     print("\n" + "─" * 50)
     print("  RESULTS")
     print("─" * 50)
@@ -551,7 +754,6 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
 # ─── interactive prompt ───────────────────────────────────────────────────────
 
 def prompt_mode() -> tuple:
-    """Returns (effective_mode, aggressive)."""
     print("  select mode:")
     print()
     print("    [1]  full              HTML + assets + screenshots")
@@ -588,7 +790,6 @@ def prompt_mode() -> tuple:
                     return 'screenshots', True
                 print("  [?] type 1 or 2")
         print("  [?] type 1, 2 or 3")
-
 
 def prompt_urls() -> list:
     print()
@@ -644,7 +845,6 @@ def prompt_urls() -> list:
 
         print("  [?] type 1 or 2")
 
-
 def prompt_output() -> Path:
     try:
         raw = input("\n  output dir [./results]: ").strip()
@@ -654,15 +854,11 @@ def prompt_output() -> Path:
     out.mkdir(parents=True, exist_ok=True)
     return out
 
-
-# ─── entry point ──────────────────────────────────────────────────────────────
-
 def main():
     print(BANNER)
 
     VALID_MODES = ('full', 'screenshots', 'clean-full', 'clean-screenshots')
 
-    # if flags are passed, use them directly (non-interactive)
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser(description='snap.py — web snapshot tool')
         parser.add_argument('urls', nargs='*')
@@ -692,7 +888,6 @@ def main():
         run(unique, out, mode=args.mode, keep_folders=args.keep_folders)
         return
 
-    # ── interactive ───────────────────────────────────────────────────────
     effective, aggressive = prompt_mode()
     mode = f"clean-{effective}" if aggressive else effective
     urls = prompt_urls()
@@ -710,7 +905,6 @@ def main():
     print(f"  {'─'*44}\n")
 
     run(unique, out, mode=mode)
-
 
 if __name__ == '__main__':
     main()
