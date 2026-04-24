@@ -451,37 +451,54 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
     if not captured:
         return html
 
+    # Dodajemy <base href=".">, aby przeglądarka wiedziała, że szuka plików w tym samym folderze
     if '<base ' not in html.lower():
         html = html.replace('<head>', '<head>\n<base href=".">', 1)
 
-    rewrites = {}
+    # Regex do złapania atrybutów src, href, data-src, content
+    # Grupa 'attr' to nazwa atrybutu, 'url' to wartość wewnątrz cudzysłowu
+    attr_pattern = re.compile(
+        r'(?P<attr>(?:src|href|data-src|data-bg|content)\s*=\s*["\'])(?P<url>[^"\']+)(?P<end>["\'])',
+        re.IGNORECASE
+    )
 
-    for asset_url, local_rel in captured.items():
-        rewrites[asset_url] = local_rel
-        p = urlparse(asset_url)
-        proto_rel = '//' + p.netloc + p.path + ('?' + p.query if p.query else '')
-        if proto_rel not in rewrites:
-            rewrites[proto_rel] = local_rel
-        path_only = p.path
-        if path_only and path_only not in rewrites:
-            rewrites[path_only] = local_rel
-        path_q = p.path + ('?' + p.query if p.query else '')
-        if path_q and path_q not in rewrites:
-            rewrites[path_q] = local_rel
+    def replacer(match):
+        attr = match.group('attr')
+        url = match.group('url')
+        end = match.group('end')
 
-    for original in sorted(rewrites, key=len, reverse=True):
-        local = rewrites[original]
-        if not original or original == local:
-            continue
+        # Jeśli to link typu "data:", "blob:" lub kotwica "#", nie ruszaj :)
+        if url.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:')):
+            return match.group(0)
+
+        # Przekształcamy link względny z HTML (np. "css/style.css") 
+        # na pełny URL (np. "https://domena.pl/css/style.css") używając urljoin
+        # mialem problemy z niektorymi stronami, ktore maja dziwne linki, wiec dodalem try-except z fallbackiem do oryginalnego linku, niektore strony maja np. href="javascript:void(0)" albo href="/#section" albo href="https://example.com/page#fragment" i urljoin sie wtedy gubi, wiec lepiej zostawic oryginalny link niz próbować go naprawiać i psuć cały HTML
+        try:
+            absolute_url = urljoin(page_url, url)
+        except ValueError:
+            return match.group(0)
+
+        # Sprawdzamy, czy taki pełny URL został pobrany i zapisany w folderze assets
+        if absolute_url in captured:
+            local_path = captured[absolute_url]
+            # Zwracamy podmieniony link: href="assets/..."
+            return attr + local_path + end
+
+        # Jeśli nie pobraliśmy tego pliku, zostawiamy link oryginalny
+        return match.group(0)
+
+    # Wykonujemy podmianę w całym HTML
+    html = attr_pattern.sub(replacer, html)
+
+    # Oryginalny kod obsługujący style CSS wewnątrz tagów (background-image: url(...))
+    # Warto go zachować, ale pamiętaj, że on też musi radzić sobie ze ścieżkami względnymi, jeśli są w CSS
+    for original in sorted(captured, key=len, reverse=True):
+        local = captured[original]
+        if original == local: continue
         escaped = re.escape(original)
         
-        html = re.sub(
-            r'((?:src|href|data-src|data-bg|poster|content)\s*=\s*["\'])(' + escaped + r')(["\'])',
-            r'\g<1>' + local + r'\3',
-            html,
-            flags=re.IGNORECASE
-        )
-        
+        # Podmiana dla url(...) w CSS
         html = re.sub(
             r'(url\(\s*["\']?)(' + escaped + r')(["\']?\s*\))',
             r'\g<1>' + local + r'\3',
