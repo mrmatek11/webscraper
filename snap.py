@@ -409,7 +409,7 @@ def _navigate(page, url: str) -> bool:
 
 # ─── asset capture via network interception ───────────────────────────────────
 
-def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict):
+def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict, css_assets: dict):
     def handle_response(response):
         try:
             req_url, _ = urldefrag(response.url)
@@ -438,8 +438,14 @@ def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict)
             abs_path.write_bytes(body)
             captured[req_url] = local_rel
             
+            # Store CSS files for later URL rewriting
+            if 'text/css' in content_type or ext == '.css':
+                css_assets[req_url] = (abs_path, body)
+            
             if response.url != req_url:
                 captured[response.url] = local_rel
+                if 'text/css' in content_type or ext == '.css':
+                    css_assets[response.url] = (abs_path, body)
 
         except Exception:
             pass
@@ -451,62 +457,152 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
     if not captured:
         return html
 
-    # Dodajemy <base href=".">, aby przeglądarka wiedziała, że szuka plików w tym samym folderze
-    if '<base ' not in html.lower():
-        html = html.replace('<head>', '<head>\n<base href=".">', 1)
 
-    # Regex do złapania atrybutów src, href, data-src, content
-    # Grupa 'attr' to nazwa atrybutu, 'url' to wartość wewnątrz cudzysłowu
-    attr_pattern = re.compile(
-        r'(?P<attr>(?:src|href|data-src|data-bg|content)\s*=\s*["\'])(?P<url>[^"\']+)(?P<end>["\'])',
+    # Insert <base href="./"> BEFORE other rewrites so the url() loop below won't touch it.
+    if '<base ' not in html.lower():
+        html = html.replace('<head>', '<head>\n<base href="./">', 1)
+
+    # ── 1. Rewrite src/href/data-* attribute values ───────────────────────────
+    attr_pat = re.compile(
+        r'(?P<attr>(?:src|href|data-src|data-bg|data-retina|data-lazy-src)'
+        r'\s*=\s*["\'\'])(?P<url>[^"\'\']+)(?P<end>["\'\'])',
+        re.IGNORECASE
+    )
+    srcset_pat = re.compile(
+        r'(?P<attr>srcset\s*=\s*["\'\'])(?P<val>[^"\'\']+)(?P<end>["\'\'])',
         re.IGNORECASE
     )
 
-    def replacer(match):
-        attr = match.group('attr')
-        url = match.group('url')
-        end = match.group('end')
-
-        # Jeśli to link typu "data:", "blob:" lub kotwica "#", nie ruszaj :)
-        if url.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:')):
-            return match.group(0)
-
-        # Przekształcamy link względny z HTML (np. "css/style.css") 
-        # na pełny URL (np. "https://domena.pl/css/style.css") używając urljoin
-        # mialem problemy z niektorymi stronami, ktore maja dziwne linki, wiec dodalem try-except z fallbackiem do oryginalnego linku, niektore strony maja np. href="javascript:void(0)" albo href="/#section" albo href="https://example.com/page#fragment" i urljoin sie wtedy gubi, wiec lepiej zostawic oryginalny link niz próbować go naprawiać i psuć cały HTML
+    def _abs(url):
         try:
-            absolute_url = urljoin(page_url, url)
+            return urljoin(page_url, url)
         except ValueError:
-            return match.group(0)
+            return None
 
-        # Sprawdzamy, czy taki pełny URL został pobrany i zapisany w folderze assets
-        if absolute_url in captured:
-            local_path = captured[absolute_url]
-            # Zwracamy podmieniony link: href="assets/..."
-            return attr + local_path + end
+    def replacer(m):
+        attr, url, end = m.group('attr'), m.group('url'), m.group('end')
+        if url.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:', 'javascript:')):
+            return m.group(0)
+        a = _abs(url)
+        if a and a in captured:
+            return attr + captured[a] + end
+        return m.group(0)
 
-        # Jeśli nie pobraliśmy tego pliku, zostawiamy link oryginalny
-        return match.group(0)
+    def replacer_srcset(m):
+        attr, val, end = m.group('attr'), m.group('val'), m.group('end')
+        parts = []
+        for part in val.split(','):
+            tokens = part.strip().split()
+            if tokens:
+                a = _abs(tokens[0])
+                if a and a in captured:
+                    tokens[0] = captured[a]
+            parts.append(' '.join(tokens))
+        return attr + ', '.join(parts) + end
 
-    # Wykonujemy podmianę w całym HTML
-    html = attr_pattern.sub(replacer, html)
+    html = attr_pat.sub(replacer, html)
+    html = srcset_pat.sub(replacer_srcset, html)
 
-    # Oryginalny kod obsługujący style CSS wewnątrz tagów (background-image: url(...))
-    # Warto go zachować, ale pamiętaj, że on też musi radzić sobie ze ścieżkami względnymi, jeśli są w CSS
+    # ── 2. Rewrite absolute URLs inside url(...) anywhere in the HTML ─────────
+    # (covers inline style="background-image:url(https://...)" etc.)
+    # Sort longest-first to avoid partial matches.
     for original in sorted(captured, key=len, reverse=True):
         local = captured[original]
-        if original == local: continue
-        escaped = re.escape(original)
-        
-        # Podmiana dla url(...) w CSS
+        if original == local:
+            continue
+        esc = re.escape(original)
         html = re.sub(
-            r'(url\(\s*["\']?)(' + escaped + r')(["\']?\s*\))',
-            r'\g<1>' + local + r'\3',
-            html,
-            flags=re.IGNORECASE
+            r'url\((["\'\']?)' + esc + r'(["\'\']?)\)',
+            lambda m, loc=local: 'url(' + m.group(1) + loc + m.group(2) + ')',
+            html, flags=re.IGNORECASE
         )
 
+    # ── 3. Rewrite relative url() refs inside inline style attributes ─────────
+    # Playwright HTML-encodes quotes inside style as &quot; so we handle both
+    # raw quotes and &quot; variants.
+    _url_in_style = re.compile(
+        r'url\(\s*(?:&quot;|["\'\'])?([^"\'\')&\s]+)(?:&quot;|["\'\'])?\s*\)',
+        re.IGNORECASE
+    )
+
+    def _fix_style_url(m):
+        ref = m.group(1)
+        if ref.startswith(('data:', 'blob:', '#')):
+            return m.group(0)
+        a = _abs(ref)
+        if a and a in captured:
+            return 'url("' + captured[a] + '")' 
+        return m.group(0)
+
+    # Apply only inside style="..." (double or single quoted, or &quot; encoded)
+    def _fix_style_attr(m):
+        return m.group('pre') + _url_in_style.sub(_fix_style_url, m.group('val')) + m.group('post')
+
+    html = re.sub(
+        r'(?P<pre>style=")(?P<val>[^"]*)(?P<post>")',
+        _fix_style_attr, html, flags=re.IGNORECASE
+    )
+    html = re.sub(
+        r"(?P<pre>style=')(?P<val>[^']*)(?P<post>')",
+        _fix_style_attr, html, flags=re.IGNORECASE
+    )
+
     return html
+
+
+def _rewrite_single_css(css_text: str, css_url: str, captured: dict) -> tuple:
+    """
+    Rewrite url() and @import refs in one CSS string.
+    Returns (new_text, changed).
+    CSS files all live in assets/ - we reference siblings by filename only.
+    """
+    url_pat = re.compile(r'url\(\s*(["\']?)([^\"\')\ s]+)\1\s*\)', re.IGNORECASE)
+    imp_pat = re.compile(r'(@import\s+)(["\'])([^\"\']+)\2', re.IGNORECASE)
+    changed = False
+
+    def _local(ref):
+        if ref.startswith(('data:', 'blob:', '#', 'javascript:')):
+            return None
+        try:
+            absolute = urljoin(css_url, ref)
+        except ValueError:
+            return None
+        return captured[absolute].split('/')[-1] if absolute in captured else None
+
+    def repl_url(m):
+        nonlocal changed
+        q, ref = m.group(1), m.group(2)
+        loc = _local(ref)
+        if loc:
+            changed = True
+            return f'url({q}{loc}{q})'
+        return m.group(0)
+
+    def repl_import(m):
+        nonlocal changed
+        prefix, q, ref = m.group(1), m.group(2), m.group(3)
+        loc = _local(ref)
+        if loc:
+            changed = True
+            return f'{prefix}{q}{loc}{q}'
+        return m.group(0)
+
+    css_text = url_pat.sub(repl_url, css_text)
+    css_text = imp_pat.sub(repl_import, css_text)
+    return css_text, changed
+
+
+def _rewrite_css_assets(css_assets: dict, captured: dict):
+    """Rewrite URLs inside all captured CSS files to point to local assets."""
+    for css_url, (abs_path, original_body) in css_assets.items():
+        try:
+            css_text = original_body.decode('utf-8', errors='replace')
+            new_css, changed = _rewrite_single_css(css_text, css_url, captured)
+            if changed:
+                abs_path.write_text(new_css, encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
 
 def _convert_blobs_to_base64(page):
     try:
@@ -542,6 +638,68 @@ def _convert_blobs_to_base64(page):
         pass
 
 
+
+# ─── fallback CSS asset fetcher ───────────────────────────────────────────────
+
+def _fetch_missing_css_assets(css_assets: dict, captured: dict, assets_dir: Path, fname_counts: dict, session: requests.Session):
+    """
+    After page load, scan all captured CSS files for url(...) references
+    that weren't captured by the network interceptor, and download them directly.
+    This catches fonts, images, etc. loaded only via CSS (e.g. Google Fonts @font-face).
+    """
+    url_pattern = re.compile(
+        r'url\(\s*["\']?([^"\')\s]+)["\']?\s*\)',
+        re.IGNORECASE
+    )
+    import_pattern_css = re.compile(
+        r'@import\s+["\']([^"\']+)["\']',
+        re.IGNORECASE
+    )
+
+    queue = list(css_assets.keys())
+    visited_css = set(queue)
+
+    while queue:
+        css_url = queue.pop(0)
+        entry = css_assets.get(css_url)
+        if entry is None:
+            continue
+        abs_path, body = entry
+
+        try:
+            css_text = body.decode('utf-8', errors='replace')
+        except Exception:
+            continue
+
+        refs = [m.group(1) for m in url_pattern.finditer(css_text)]
+        refs += [m.group(1) for m in import_pattern_css.finditer(css_text)]
+
+        for ref in refs:
+            if ref.startswith(('data:', 'blob:', '#')):
+                continue
+            try:
+                absolute = urljoin(css_url, ref)
+            except ValueError:
+                continue
+            if absolute in captured:
+                continue
+            try:
+                r = session.get(absolute, timeout=15)
+                if r.status_code < 200 or r.status_code >= 400 or not r.content:
+                    continue
+                content_type = r.headers.get('content-type', '').lower()
+                local_rel, local_abs = url_to_local_path(absolute, assets_dir, fname_counts, content_type)
+                local_abs.write_bytes(r.content)
+                captured[absolute] = local_rel
+                if 'text/css' in content_type or absolute.lower().endswith('.css'):
+                    if absolute not in visited_css:
+                        visited_css.add(absolute)
+                        css_assets[absolute] = (local_abs, r.content)
+                        queue.append(absolute)
+            except Exception:
+                pass
+
+
 # ─── process functions ────────────────────────────────────────────────────────
 
 def process_full(url: str, context, output_dir: Path, aggressive: bool = False) -> tuple:
@@ -550,10 +708,15 @@ def process_full(url: str, context, output_dir: Path, aggressive: bool = False) 
 
     captured = {}
     fname_counts = {}
+    css_assets = {}  # url -> (abs_path, body) for CSS rewriting
+
+    # Session for fallback direct downloads (e.g. fonts/images referenced only in CSS)
+    session = requests.Session()
+    session.headers['User-Agent'] = NORMAL_USER_AGENT
 
     _set_consent_cookies(context, url)
     page = context.new_page()
-    page.on('response', _make_response_handler(assets_dir, captured, fname_counts))
+    page.on('response', _make_response_handler(assets_dir, captured, fname_counts, css_assets))
 
     if not _navigate(page, url):
         page.close()
@@ -582,6 +745,10 @@ def process_full(url: str, context, output_dir: Path, aggressive: bool = False) 
         html = page.content()
         html = _rewrite_html(html, captured, url)
         (output_dir / 'index.html').write_text(html, encoding='utf-8', errors='replace')
+        # Download any assets found in CSS but not captured during page load (e.g. @font-face, background images)
+        _fetch_missing_css_assets(css_assets, captured, assets_dir, fname_counts, session)
+        # Rewrite URLs inside CSS files so fonts/images referenced from CSS also resolve locally
+        _rewrite_css_assets(css_assets, captured)
         unique_assets = len(set(captured.values()))
         print(f"   assets: {unique_assets} files saved")
         html_ok = True
