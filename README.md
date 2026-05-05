@@ -1,200 +1,210 @@
-Python CLI tool for archiving client websites — full-page screenshots + HTML/assets saved into dated ZIPs, grouped by domain. Powered by Playwright headless Chromium.
+# snap.py
 
-# snap.py — Web Snapshot Tool
-
-Narzędzie do archiwizacji stron internetowych. Podajesz listę URL-i,
-skrypt robi pełne screenshoty i/lub zapisuje HTML z assetami,
-pakuje wszystko do ZIPa nazwanego datą i domeną klienta.
+**Web Snapshot Tool** — narzędzie do robienia pełnych backupów stron internetowych.  
+Zapisuje HTML + wszystkie zasoby (CSS, JS, obrazki, fonty) + screenshoty do ZIP-a.  
+Gotowe do użycia przez webmasterów, do szybkiego backupu przed zmianami na stronie.
 
 ```
-  ██████  ███▄    █  ▄▄▄       ██▓███
+██████  ███▄    █  ▄▄▄       ██▓███
 ▒██    ▒  ██ ▀█   █ ▒████▄    ▓██░  ██▒
 ░ ▓██▄   ▓██  ▀█ ██▒▒██  ▀█▄  ▓██░ ██▓▒
   ▒   ██▒▓██▒  ▐▌██▒░██▄▄▄▄██ ▒██▄█▓▒ ▒
 ▒██████▒▒▒██░   ▓██░ ▓█   ▓██▒▒██▒ ░  ░
+░  ▒▓▒ ▒ ░░ ▒░   ▒ ▒  ▒▒   ▓▒█░▒▓▒░ ░  ░
+░ ░▒  ░ ░░ ░░   ░ ▒░  ▒   ▒▒ ░░▒ ░
+░  ░  ░     ░   ░ ░   ░   ▒   ░░
+      ░           ░       ░  ░
+  [ web snapshot tool ]
 ```
 
 ---
 
-## Tryby działania
+## Funkcje
 
-| Tryb | Co robi |
-|------|---------|
-| `full` | HTML + assety (CSS/JS/obrazki) + screenshot → ZIP per domena |
-| `screenshots` | Same screenshoty → ZIP per domena |
+- **Full backup** — zapisuje kompletną stronę: HTML, CSS, JS, obrazki, fonty, screenshot
+- **Screenshots only** — szybkie screenshoty całych stron (1440px wide)
+- **Crawl mode** — automatycznie odkrywa wszystkie podstrony z sitemap.xml + linki wewnętrzne
+- **Slider Revolution support** — obsługa SR7 i RevSlider 6 (wymusza renderowanie tła)
+- **Lazy load bypass** — wymusza ładowanie obrazków leniwych (data-src, data-lazy, srcset)
+- **Cookie consent** — automatycznie akceptuje cookie banery
+- **Anti-popup** — zamyka overlaye, modale, newslettery
+- **Auto retry** — ponawia nawigację przy timeoutach CDN
+- **Logowanie** — zapisuje log do pliku obok wyników
 
----
+## Tryby ZIP-a
 
-## Wymagania systemowe
+Pliki ZIP są oznaczone prefiksem żeby łatwo odróżnić typ backupu:
 
-- Linux Mint 20+ (Ubuntu 20.04+)
-- Python 3.8+
-- pip
+| Prefix | Tryb | Zawartość |
+|--------|------|-----------|
+| `FULL_` | full | HTML + assets + screenshot każdej strony |
+| `CRAWL_` | crawl | To samo co full, ale strony odkryte automatycznie |
+| `SCREENSHOTS_` | screenshots | Same screenshoty (PNG) |
 
 ---
 
 ## Instalacja
 
-### 1. Sprawdź czy masz Pythona
+### Wymagania
+
+- Python 3.8+
+- Chromium (instalowany automatycznie przez Playwright)
+
+### Szybka instalacja
 
 ```bash
-python3 --version
+git clone https://github.com/twoj-user/snap.git
+cd snap
+bash install.sh
 ```
 
-Powinno pokazać `Python 3.8.x` lub wyżej. Jeśli nie:
+### Ręczna instalacja
 
 ```bash
-sudo apt update
-sudo apt install python3 python3-pip -y
-```
-
-### 2. Zainstaluj zależności Pythona
-
-```bash
-pip install playwright requests
-```
-
-> Jeśli pip nie jest na PATH, użyj:
-> ```bash
-> python3 -m pip install playwright requests
-> ```
-
-### 3. Dodaj pip do PATH (jeśli dostajesz "command not found")
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 4. Zainstaluj przeglądarkę Chromium dla Playwright
-
-```bash
+pip install -r requirements.txt
 playwright install chromium
-```
-
-Playwright pobiera własną wersję Chromium (~170 MB), niezależną od systemowej przeglądarki.
-
-### 5. Zainstaluj zależności systemowe Chromium (jeśli coś nie działa)
-
-```bash
-playwright install-deps chromium
 ```
 
 ---
 
 ## Użycie
 
-### Interaktywne menu (zalecane)
+### Interaktywnie
 
 ```bash
 python3 snap.py
 ```
 
-Skrypt zapyta o tryb, źródło URL-i i folder wyjściowy.
+Uruchomi menu z wyborem trybu i source URL-i.
 
-### Z flagami (do automatyzacji)
+### CLI
 
 ```bash
-# Pełne archiwum z pliku
-python3 snap.py -f lista_stron.txt --mode full
+# Full backup jednej strony
+python3 snap.py https://example.com
 
-# Same screenshoty z pliku
-python3 snap.py -f lista_stron.txt --mode screenshots
+# Full backup — output do custom folderu
+python3 snap.py https://example.com -o ./backup
 
-# Pojedynczy URL
+# Screenshots only
 python3 snap.py https://example.com --mode screenshots
 
-# Własny folder wyjściowy
-python3 snap.py -f lista_stron.txt -o ~/Desktop/archiwum --mode full
+# Crawl — automatyczne odkrywanie stron
+python3 snap.py https://example.com --mode crawl
+
+# Crawl z limitem stron
+python3 snap.py https://example.com --mode crawl --max-pages 30
+
+# Z pliku z listą URL-i
+python3 snap.py -f lista_stron.txt --mode full
+
+# Full backup + agresywne zamykanie popupów
+python3 snap.py https://example.com --mode clean-full
+
+# Zachowaj foldery (nie usuwaj po spakowaniu)
+python3 snap.py https://example.com --keep-folders
 ```
+
+### Parametry
+
+| Parametr | Opis | Domyślnie |
+|----------|------|-----------|
+| `urls` | URL-e do zrobienia backupu | — |
+| `-f, --file` | Plik z listą URL-i (jeden na linię, `#` to komentarz) | — |
+| `-o, --output` | Folder na wyniki | `./results` |
+| `--mode` | `full`, `screenshots`, `crawl`, `clean-full`, `clean-screenshots`, `clean-crawl` | `full` |
+| `--max-pages` | Limit stron w crawl mode | `50` |
+| `--keep-folders` | Nie usuwaj folderów po spakowaniu do ZIP | off |
 
 ---
 
-## Plik z URL-ami
+## lista_stron.txt
 
-Utwórz plik `lista_stron.txt`, jeden URL na linię.
-Linie zaczynające się od `#` są ignorowane.
+Plik z URL-ami do przetworzenia — jeden URL na linię:
 
 ```
+# Komentarze zaczynające się od # są ignorowane
+
 https://example.com
-https://example.com/produkty/cokolwiek/
-# ta strona jest wylaczona
-https://innadomena.pl
+https://example.com/o-nas
+https://example.com/kontakt
+
+# https://strona-wylaczona.pl
 ```
 
 ---
 
-## Struktura wyjściowa
+## Struktura wyników
 
-### Tryb `full`
+### Full / Crawl mode
 
 ```
 results/
-└── 2026-04-21_14-30_ecomess.pl.zip
-    └── ecomess.pl/
-        ├── homepage/
-        │   ├── index.html
-        │   ├── screenshot_full.png
-        │   ├── meta.txt
-        │   └── assets/
-        │       ├── style.css
-        │       └── logo.png
-        ├── produkty_picoflux-air/
-        │   ├── index.html
-        │   ├── screenshot_full.png
-        │   └── assets/
-        └── kategorie_odczyt-zdalny/
+├── FULL_2026-05-05_14-30-00_example.com.zip
+│   ├── homepage/
+│   │   ├── index.html
+│   │   ├── screenshot_full.png
+│   │   ├── meta.txt
+│   │   └── assets/
+│   │       ├── style.css
+│   │       ├── logo.png
+│   │       └── ...
+│   └── kontakt/
+│       ├── index.html
+│       ├── screenshot_full.png
+│       ├── meta.txt
+│       └── assets/
+└── snap_2026-05-05_14-30-00.log
 ```
 
-### Tryb `screenshots`
+### Screenshots mode
 
 ```
 results/
-└── 2026-04-21_14-30_ecomess.pl.zip
-    ├── 2026-04-21_14-30_ecomess.pl.png
-    ├── 2026-04-21_14-30_ecomess.pl_produkty_picoflux-air.png
-    └── 2026-04-21_14-30_ecomess.pl_kategorie_odczyt-zdalny.png
-```
-
-Każdy run dostaje unikalną nazwę ZIPa z godziną — uruchamiając skrypt
-wielokrotnie tego samego dnia nic się nie nadpisuje.
-
----
-
-## Opcje
-
-| Flaga | Opis | Domyślnie |
-|-------|------|-----------|
-| `-f`, `--file` | Plik TXT z URL-ami | — |
-| `-o`, `--output` | Folder wyjściowy | `./results` |
-| `--mode` | `full` lub `screenshots` | `full` |
-| `--keep-folders` | Zachowaj foldery tymczasowe po spakowaniu | wyłączone |
-
----
-
-## Rozwiązywanie problemów
-
-**`playwright: command not found`**
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
-```
-
-**`playwright install chromium` pobiera bardzo wolno**
-Normalka, plik ma ~170 MB. Wystarczy zrobić raz.
-
-**Screenshot jest ucięty / strona się nie załadowała**
-Niektóre strony blokują headless browsery. Skrypt próbuje fallbacku
-na `domcontentloaded` jeśli `networkidle` przekroczy timeout.
-
-**`ModuleNotFoundError: No module named 'playwright'`**
-```bash
-pip install playwright --break-system-packages
+├── SCREENSHOTS_2026-05-05_14-30-00_example.com.zip
+│   ├── 2026-05-05_example.com.png
+│   ├── 2026-05-05_example.com_kontakt.png
+│   └── ...
+└── snap_2026-05-05_14-30-00.log
 ```
 
 ---
 
-## Stack
+## Co robi snap.py pod maską
 
-- [Playwright](https://playwright.dev/python/) — headless Chromium, screenshoty, JS rendering
-- [requests](https://docs.python-requests.org/) — pobieranie assetów
-- Python 3.8+ stdlib — zipfile, pathlib, argparse
+1. Otwiera stronę w headless Chromium (1440×900)
+2. Ustawia cookie consent (żeby nie wyskakiwały bannery)
+3. Nawiguje z `wait_until='networkidle'` (z retry 2x)
+4. Zamyka popupy, modale, cookie bannery
+5. Scroluje stronę (do 30000px) żeby wymusić lazy load
+6. Wymusza ładowanie obrazków leniwych (data-src, data-lazy-src, srcset)
+7. Renderuje slidery (Flickity, Slider Revolution 6, Slider Revolution 7)
+8. Klika przez wszystkie slajdy karuzel (agresywnie, 10x)
+9. Wyłącza animacje CSS (AOS, WOW)
+10. Czeka na załadowanie fontów
+11. Zamienia blob URL-e na base64
+12. Zapisuje HTML z przepisanymi ścieżkami do lokalnych assets
+13. Przepisuje CSS (url(), @import) na lokalne ścieżki
+14. Dohandlowuje brakujące assets przez requests
+15. Robi full-page screenshot (max 15000px)
+16. Pakuje wszystko do ZIP-a z DEFLATE
+
+---
+
+## Ograniczenia
+
+- Strony z anti-bot protection (Cloudflare challenge, reCAPTCHA Enterprise) mogą nie działać
+- Strony wymagające logowania — można ustawić cookie consent ale nie full auth
+- Single Page Apps z dynamicznym routingiem — crawl mode może nie znaleźć wszystkich stron
+- Infinite scroll z bardzo dużą ilością treści — scroll limit 30000px
+
+## Wymagania systemowe
+
+- Linux / macOS / Windows (WSL)
+- Python 3.8+
+- ~200MB RAM na stronę (Chromium headless)
+- Chromium (~400MB na dysku)
+
+## Licencja
+
+MIT

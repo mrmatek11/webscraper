@@ -1,16 +1,35 @@
 #!/usr/bin/env python3
 """
-snap.py — Web Snapshot Tool (Wersja 1:1 + Fix na Lazy Load obrazków)
+snap.py — Web Snapshot Tool v3 (Ostateczna wersja hybrydowa)
+Fixes:
+  #1 - _navigate: usunięty wait_for_function z === (crash na redirectach)
+  #2 - process_full: parametr page_url zamiast url (nie nadpisuje się przez pętlę img)
+  #3 - get_zip_name: timestamp z sekundami (brak kolizji przy wielu domenach)
+  #4 - _scroll_and_wait: timeout na JS evaluate (infinite scroll nie zawiesza)
+  #5 - _force_slider_render: szybki check czy Flickity istnieje (nie czeka 8s)
+  #6 - screenshot: limit wysokości 15000px (brak crashy na długich LP)
+  #7 - _rewrite_html: mądra obsługa <base> (zostawia oryginalny zamiast usuwać)
+Nowe z v3:
+  - progress bar [n/total] przy każdej stronie
+  - wypisywanie aktualnego URL przeglądarki po nawigacji
+  - _force_sr7_render (obsługa Slider Revolution 7)
+  - _force_revslider_render (obsługa starszego RevSlidera 6)
+  - _disable_css_animations (wyłączanie animacji AOS/WOW)
+  - _force_carousel_load_aggressive (agresywne klikanie karuzel)
 """
 
 import argparse
+import logging
 import re
 import shutil
 import sys
+import time
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Tuple
 from urllib.parse import urlparse, urljoin, urldefrag
 
 import requests
@@ -21,7 +40,7 @@ BANNER = r"""
 ░ ▓██▄   ▓██  ▀█ ██▒▒██  ▀█▄  ▓██░ ██▓▒
   ▒   ██▒▓██▒  ▐▌██▒░██▄▄▄▄██ ▒██▄█▓▒ ▒
 ▒██████▒▒▒██░   ▓██░ ▓█   ▓██▒▒██▒ ░  ░
-▒ ▒▓▒ ▒ ░░ ▒░   ▒ ▒  ▒▒   ▓▒█░▒▓▒░ ░  ░
+░ ' ▒▓▒ ▒ ░░ ' ░   ▒ ▒  ▒▒   ▓▒█░▒▓▒░ ░  ░
 ░ ░▒  ░ ░░ ░░   ░ ▒░  ▒   ▒▒ ░░▒ ░
 ░  ░  ░     ░   ░ ░   ░   ▒   ░░
       ░           ░       ░  ░
@@ -48,8 +67,131 @@ CONTENT_TYPE_MAP = {
     'application/json': '.json',
 }
 
-NORMAL_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+NORMAL_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/121.0.0.0 Safari/537.36"
+)
 
+SCREENSHOT_MAX_HEIGHT = 15000
+
+_log_file = None
+_log_handler = None
+
+
+def setup_logging(output_dir: Path):
+    global _log_file, _log_handler
+    ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    _log_file = output_dir / f"snap_{ts}.log"
+    _log_handler = logging.FileHandler(_log_file, encoding='utf-8')
+    _log_handler.setFormatter(logging.Formatter('%(asctime)s  %(message)s', datefmt='%H:%M:%S'))
+    _log_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(_log_handler)
+    logging.getLogger().setLevel(logging.INFO)
+    return _log_file
+
+
+# ─── sitemap / crawl ───────────────────────────────────────────────────────────
+
+def fetch_sitemap_urls(base_url: str, session: requests.Session) -> list:
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    candidates = [
+        urljoin(base_url, '/sitemap.xml'),
+        urljoin(base_url, '/sitemap_index.xml'),
+        urljoin(base_url, '/sitemap-index.xml'),
+        urljoin(base_url, '/wp-sitemap.xml'),
+    ]
+    found = []
+    for sm_url in candidates:
+        try:
+            r = session.get(sm_url, timeout=10, headers={'User-Agent': NORMAL_USER_AGENT})
+            if r.status_code != 200:
+                continue
+            found.extend(_parse_sitemap_xml(r.text, origin))
+        except Exception:
+            continue
+    return found
+
+
+def _parse_sitemap_xml(xml_text: str, origin: str) -> list:
+    urls = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return urls
+
+    ns = ''
+    if root.tag.startswith('{'):
+        ns = root.tag.split('}')[0] + '}'
+
+    for sm_element in root.findall(f'{ns}sitemap') + root.findall('sitemap'):
+        loc = sm_element.find(f'{ns}loc') or sm_element.find('loc')
+        if loc is not None and loc.text:
+            sm_url = loc.text.strip()
+            try:
+                r = requests.get(sm_url, timeout=10, headers={'User-Agent': NORMAL_USER_AGENT})
+                if r.status_code == 200:
+                    urls.extend(_parse_sitemap_xml(r.text, origin))
+            except Exception:
+                pass
+
+    for url_element in root.findall(f'{ns}url') + root.findall('url'):
+        loc = url_element.find(f'{ns}loc') or url_element.find('loc')
+        if loc is not None and loc.text:
+            url = loc.text.strip()
+            if url.startswith(origin):
+                urls.append(url)
+
+    return urls
+
+
+SKIP_EXTENSIONS = {
+    '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif', '.ico',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf', '.mp4', '.webm', '.ogg', '.mp3',
+    '.json', '.xml', '.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip',
+    '.rar', '.gz', '.map', '.less', '.scss',
+}
+
+def crawl_internal_links(page_url: str, session: requests.Session, max_pages: int = 50,
+                         same_domain_only: bool = True) -> list:
+    parsed = urlparse(page_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    domain = parsed.netloc
+
+    try:
+        r = session.get(page_url, timeout=15, headers={'User-Agent': NORMAL_USER_AGENT})
+        if r.status_code != 200:
+            return [page_url]
+    except Exception:
+        return [page_url]
+
+    found_urls = {page_url}
+    href_pat = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+    seen = set()
+
+    for m in href_pat.finditer(r.text):
+        href = m.group(1).strip()
+        if href.startswith(('#', 'mailto:', 'tel:', 'javascript:', 'data:')):
+            continue
+        full = urljoin(page_url, href)
+        full, _ = urldefrag(full)
+        fp = urlparse(full)
+        if not fp.scheme in ('http', 'https'):
+            continue
+        if fp.netloc != domain:
+            continue
+        ext = Path(fp.path).suffix.lower()
+        if ext in SKIP_EXTENSIONS:
+            continue
+        clean = full.rstrip('/')
+        if clean not in seen:
+            seen.add(clean)
+            if len(seen) > max_pages:
+                break
+            found_urls.add(clean)
+
+    return sorted(found_urls)
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -66,8 +208,14 @@ def get_subfolder_name(url: str) -> str:
     name = sanitize_name(path.replace('/', '_'))
     return name[:80]
 
-def get_zip_name(domain: str) -> str:
-    return f"{datetime.now().strftime('%Y-%m-%d_%H-%M')}_{sanitize_name(domain)}.zip"
+def get_zip_name(domain: str, mode: str = 'full') -> str:
+    ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    d = sanitize_name(domain)
+    if mode == 'screenshots':
+        return f"SCREENSHOTS_{ts}_{d}.zip"
+    if mode == 'crawl':
+        return f"CRAWL_{ts}_{d}.zip"
+    return f"FULL_{ts}_{d}.zip"
 
 def get_screenshot_filename(url: str) -> str:
     domain = get_domain(url)
@@ -85,7 +233,7 @@ def url_to_local_path(asset_url: str, assets_dir: Path, fname_counts: dict, cont
     base = sanitize_name(base).split('?')[0] or 'asset'
 
     if not Path(base).suffix:
-        guessed_ext = '.bin'
+        guessed_ext = '.dat'
         for ct_key, ct_ext in CONTENT_TYPE_MAP.items():
             if ct_key in content_type:
                 guessed_ext = ct_ext
@@ -103,7 +251,6 @@ def url_to_local_path(asset_url: str, assets_dir: Path, fname_counts: dict, cont
 
     abs_path = assets_dir / base
     return f"assets/{base}", abs_path
-
 
 # ─── popup killing ────────────────────────────────────────────────────────────
 
@@ -137,8 +284,8 @@ def inject_anti_popup_css(page):
                     [id*="mfp-popup"], [class*="mfp-wrap"],
                     [class*="age-gate"], [id*="age-gate"],
                     [class*="exit-intent"], [id*="exit-intent"],
-                    [class*="push-notification"], [id*="push-notification"]
-                    { display: none !important; }
+                    [class*="push-notification"], [id*="push-notification"],
+                    #mfn-gdpr { display: none !important; }
                 `;
                 document.head.appendChild(style);
             }
@@ -172,6 +319,7 @@ def close_popups(page):
         '[class*="overlay"] [class*="close"]',
         'svg[class*="close"]', 'svg[aria-label="Close"]', 'svg[aria-label="close"]',
         'img[alt="Close"]', 'img[alt="Zamknij"]', 'img[alt="zamknij"]',
+        '.mfn-gdpr-button',
     ]
     for selector in dismiss_selectors:
         try:
@@ -205,7 +353,7 @@ def close_popups(page):
                 document.body.style.paddingRight = '';
                 document.documentElement.style.overflow = '';
                 document.querySelectorAll(
-                    '#cookies_message_modal, #cookies_message, ' +
+                    '#cookies_message_modal, #cookies_message, #mfn-gdpr, ' +
                     '[id*="cookie-banner"], [id*="cookiebar"], [id*="cookie-notice"]'
                 ).forEach(el => el.remove());
                 document.querySelectorAll('*').forEach(el => {
@@ -253,87 +401,94 @@ def close_popups_aggressive(page):
     except Exception:
         pass
 
-
 # ─── navigation helpers ───────────────────────────────────────────────────────
 
 def _scroll_and_wait(page):
     try:
         page.evaluate("""
-            async () => {
-                await new Promise(resolve => {
-                    let total = 0;
-                    const step = 300;
-                    const dist = document.body.scrollHeight;
-                    const timer = setInterval(() => {
-                        window.scrollBy(0, step);
-                        total += step;
-                        if (total >= dist) {
-                            clearInterval(timer);
-                            window.scrollTo(0, 0);
-                            resolve();
-                        }
-                    }, 100);
-                });
-            }
-        """)
+            () => new Promise(resolve => {
+                let total = 0;
+                const step = 300;
+                const dist = Math.min(document.body.scrollHeight, 30000);
+                const timer = setInterval(() => {
+                    window.scrollBy(0, step);
+                    total += step;
+                    if (total >= dist) {
+                        clearInterval(timer);
+                        window.scrollTo(0, 0);
+                        resolve();
+                    }
+                }, 100);
+                setTimeout(() => { clearInterval(timer); window.scrollTo(0, 0); resolve(); }, 8000);
+            })
+        """, timeout=10000)
         page.wait_for_timeout(1500)
     except Exception:
         pass
 
 def _force_lazy_load(page):
-    """Brutalnie wymusza załadowanie obrazków typu data-lazy-src (LiteSpeed, WP Rocket itp.)"""
     try:
         page.evaluate("""
             () => {
-                // Wymuszenie dla LiteSpeed Cache / WP Rocket (data-lazy-src)
-                document.querySelectorAll('img[data-lazy-src]').forEach(img => {
-                    img.src = img.getAttribute('data-lazy-src');
-                    if (img.getAttribute('data-lazy-srcset')) {
-                        img.srcset = img.getAttribute('data-lazy-srcset');
-                    }
-                    if (img.getAttribute('data-lazy-sizes')) {
-                        img.sizes = img.getAttribute('data-lazy-sizes');
-                    }
-                    img.classList.remove('lazyloading', 'lazyload');
+                const applyImage = (img, src, srcset, sizes) => {
+                    if (src) img.src = src;
+                    if (srcset) img.srcset = srcset;
+                    if (sizes) img.sizes = sizes;
+                    img.classList.remove('lazyload', 'lazyloading');
                     img.classList.add('lazyloaded');
+                };
+                document.querySelectorAll('img').forEach(img => {
+                    let src = img.getAttribute('data-lazy-src') || img.getAttribute('data-src') || img.getAttribute('data-original');
+                    let srcset = img.getAttribute('data-lazy-srcset') || img.getAttribute('data-srcset');
+                    let sizes = img.getAttribute('data-lazy-sizes') || img.getAttribute('data-sizes');
+                    if (src || srcset) applyImage(img, src, srcset, sizes);
+                    if (img.loading === 'lazy') img.loading = 'eager';
                 });
-                
-                // Wymuszenie dla natywnego lazy loading (loading="lazy")
-                document.querySelectorAll('img[loading="lazy"]').forEach(img => {
-                    img.loading = 'eager';
+                document.querySelectorAll('[data-bg], [data-lazy-bg]').forEach(el => {
+                    let bg = el.getAttribute('data-bg') || el.getAttribute('data-lazy-bg');
+                    if (bg) el.style.backgroundImage = 'url(' + bg + ')';
+                });
+                document.querySelectorAll('source').forEach(source => {
+                    let srcset = source.getAttribute('data-lazy-srcset') || source.getAttribute('data-srcset');
+                    if (srcset) source.srcset = srcset;
                 });
             }
         """)
-        page.wait_for_timeout(500) # Czekamy ułamek sekundy aż przeglądarka zacznie pobierać prawdziwe pliki
-    except Exception:
-        pass
+        page.wait_for_timeout(800)
+    except Exception as e:
+        print(f"   lazy load warning: {e}")
 
 def _force_slider_render(page):
-    """Przesuwa Flickity slajdy jeden po drugim, wymuszając lazy-load każdego zdjęcia."""
     try:
-        page.wait_for_function("""
+        has_flickity = page.evaluate("""
             () => typeof window.Flickity !== 'undefined' ||
                   document.querySelector('.flickity-enabled') !== null
-        """, timeout=8000)
+        """)
     except Exception:
-        pass
+        has_flickity = False
+
+    if not has_flickity:
+        return
 
     try:
         page.evaluate("""
             () => {
+                document.querySelectorAll('.flickity-enabled').forEach(carousel => {
+                    const flkty = window.Flickity?.data(carousel);
+                    if (flkty && flkty.slides) {
+                        const total = flkty.slides.length;
+                        for (let i = 0; i < total; i++) flkty.select(i, false, true);
+                        flkty.select(0, false, true);
+                    }
+                });
                 const carousels = document.querySelectorAll('.deeper-carousel-box');
                 carousels.forEach(carousel => {
                     const items = carousel.querySelectorAll('.deeper-fancy-image');
                     const count = items.length;
                     if (!count) return;
-
-                    const flkty = window.Flickity && window.Flickity.data
-                        ? window.Flickity.data(carousel)
-                        : null;
-
+                    const flkty = window.Flickity && window.Flickity.data ? window.Flickity.data(carousel) : null;
                     for (let i = 0; i < count; i++) {
                         if (flkty) flkty.select(i, false, true);
-
                         items[i].querySelectorAll('img[data-lazy-src], img[src*="svg+xml"]').forEach(img => {
                             const real = img.getAttribute('data-lazy-src');
                             if (real) {
@@ -343,12 +498,265 @@ def _force_slider_render(page):
                             }
                         });
                     }
-
                     if (flkty) flkty.select(0, false, true);
                 });
             }
         """)
         page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+def _force_sr7_render(page):
+    """Handle Slider Revolution 7 (SR7) — custom web components + base64 data-dbsrc."""
+    try:
+        has_sr7 = page.evaluate("() => document.querySelector('sr7-module') !== null")
+    except Exception:
+        return
+    if not has_sr7:
+        return
+
+    sr7_ready = False
+    for _ in range(20):
+        try:
+            sr7_ready = page.evaluate("""
+                () => {
+                    if (window.SR7 && window.SR7.M) {
+                        for (const k of Object.keys(window.SR7.M)) {
+                            if (window.SR7.M[k] && window.SR7.M[k].state === true) return true;
+                        }
+                    }
+                    const bgs = document.querySelectorAll('sr7-bg');
+                    for (const bg of bgs) {
+                        const s = window.getComputedStyle(bg);
+                        if (s.backgroundImage && s.backgroundImage !== 'none') return true;
+                    }
+                    const canvases = document.querySelectorAll('sr7-module canvas');
+                    for (const c of canvases) {
+                        if (c.width > 100 && c.height > 100) return true;
+                    }
+                    return false;
+                }
+            """)
+            if sr7_ready:
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+
+    if sr7_ready:
+        try:
+            page.evaluate("""
+                () => {
+                    document.querySelectorAll('sr7-loader, .sr7-loader, .tp-loader, .rs-loader').forEach(el => el.style.setProperty('display', 'none', 'important'));
+                    document.querySelectorAll('sr7-module').forEach(mod => {
+                        mod.style.setProperty('visibility', 'visible', 'important');
+                        mod.style.setProperty('opacity', '1', 'important');
+                    });
+                }
+            """)
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+        return
+
+    try:
+        page.evaluate("""
+            () => {
+                document.querySelectorAll('sr7-bg').forEach(bg => {
+                    const noscript = bg.querySelector('noscript');
+                    if (!noscript) return;
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = noscript.textContent || noscript.innerText;
+                    const img = tmp.querySelector('img');
+                    if (img && img.src) {
+                        bg.style.setProperty('background-image', 'url(' + img.src + ')', 'important');
+                        bg.style.setProperty('background-size', 'cover', 'important');
+                        bg.style.setProperty('background-position', 'center center', 'important');
+                        bg.style.setProperty('display', 'block', 'important');
+                        bg.style.setProperty('position', 'absolute', 'important');
+                        bg.style.setProperty('inset', '0', 'important');
+                    }
+                });
+                document.querySelectorAll('sr7-module').forEach(mod => {
+                    mod.style.setProperty('min-height', '100vh', 'important');
+                    mod.style.setProperty('position', 'relative', 'important');
+                    mod.style.setProperty('overflow', 'hidden', 'important');
+                });
+                document.querySelectorAll('sr7-content').forEach(c => {
+                    c.style.setProperty('min-height', '100vh', 'important');
+                    c.style.setProperty('position', 'relative', 'important');
+                });
+                document.querySelectorAll('sr7-slide').forEach(s => {
+                    s.style.setProperty('min-height', '100vh', 'important');
+                    s.style.setProperty('position', 'relative', 'important');
+                    s.style.setProperty('display', 'block', 'important');
+                });
+                document.querySelectorAll('sr7-txt').forEach(t => {
+                    t.style.setProperty('visibility', 'visible', 'important');
+                    t.style.setProperty('opacity', '1', 'important');
+                    t.style.setProperty('position', 'absolute', 'important');
+                });
+                document.querySelectorAll('sr7-slide > a.sr7-layer').forEach(a => {
+                    a.style.setProperty('visibility', 'visible', 'important');
+                    a.style.setProperty('opacity', '1', 'important');
+                    a.style.setProperty('position', 'absolute', 'important');
+                });
+                document.querySelectorAll('sr7-loader, .sr7-loader, .tp-loader, .rs-loader').forEach(el => el.style.setProperty('display', 'none', 'important'));
+
+                const imageLists = document.querySelector('image_lists');
+                if (imageLists) {
+                    imageLists.querySelectorAll('img[data-dbsrc]').forEach(img => {
+                        try {
+                            const url = atob(img.getAttribute('data-dbsrc'));
+                            const full = url.startsWith('//') ? 'https:' + url : url;
+                            const preload = new Image();
+                            preload.src = full;
+                        } catch(e) {}
+                    });
+                }
+
+                if (window.SR7 && window.SR7.JSON) {
+                    try {
+                        Object.values(window.SR7.JSON).forEach(slider => {
+                            if (!slider || !slider.slides) return;
+                            Object.values(slider.slides).forEach(slide => {
+                                if (!slide || !slide.slide || !slide.slide.layers) return;
+                                Object.values(slide.slide.layers).forEach(layer => {
+                                    if (layer && layer.bg && layer.bg.image && layer.bg.image.src) {
+                                        new Image().src = layer.bg.image.src;
+                                    }
+                                });
+                            });
+                        });
+                    } catch(e) {}
+                }
+            }
+        """)
+        page.wait_for_timeout(2000)
+    except Exception as e:
+        print(f"   [SR7 fallback warning] {e}")
+
+def _force_revslider_render(page):
+    """Revolution Slider 6 (rs-module / rs-bg) — older WP plugin variant."""
+    try:
+        has_rs = page.evaluate("() => document.querySelector('rs-module') !== null")
+    except Exception:
+        return
+    if not has_rs:
+        return
+
+    rs_ready = False
+    for _ in range(15):
+        try:
+            rs_ready = page.evaluate("""
+                () => {
+                    if (window.revapi) {
+                        if (typeof window.revapi === 'function') return true;
+                        if (typeof window.revapi === 'object' && Object.keys(window.revapi).length > 0) {
+                            const key = Object.keys(window.revapi)[0];
+                            if (window.revapi[key] && window.revapi[key].revapis) return true;
+                        }
+                    }
+                    const modules = document.querySelectorAll('rs-module');
+                    for (const mod of modules) {
+                        const bgs = mod.querySelectorAll('.rs-sbg, rs-sbg img, rs-sbg[style*="background"]');
+                        if (bgs.length > 0 && bgs[0].getBoundingClientRect().width > 100) return true;
+                    }
+                    return false;
+                }
+            """)
+            if rs_ready:
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+
+    if rs_ready:
+        try:
+            page.evaluate("""
+                () => {
+                    document.querySelectorAll('.rs-loader, rs-loader, .tp-loader').forEach(el => {
+                        el.style.setProperty('display', 'none', 'important');
+                    });
+                }
+            """)
+        except Exception:
+            pass
+        return
+
+    try:
+        page.evaluate("""
+            () => {
+                document.querySelectorAll('rs-bg noscript, rs-sbg noscript').forEach(noscript => {
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = noscript.textContent || noscript.innerText;
+                    const img = tmp.querySelector('img');
+                    if (img && img.src) {
+                        const parent = noscript.closest('rs-bg') || noscript.closest('rs-sbg');
+                        if (parent) {
+                            parent.style.setProperty('background-image', 'url(' + img.src + ')', 'important');
+                            parent.style.setProperty('background-size', 'cover', 'important');
+                        }
+                    }
+                });
+                document.querySelectorAll('rs-sbg').forEach(sbg => {
+                    sbg.style.setProperty('visibility', 'visible', 'important');
+                    sbg.style.setProperty('opacity', '1', 'important');
+                });
+                document.querySelectorAll('.rs-loader, rs-loader, .tp-loader').forEach(el => {
+                    el.style.setProperty('display', 'none', 'important');
+                });
+                document.querySelectorAll('rs-module').forEach(mod => {
+                    mod.style.setProperty('visibility', 'visible', 'important');
+                    mod.style.setProperty('opacity', '1', 'important');
+                });
+                document.querySelectorAll('.rs-layer[data-rr]').forEach(layer => {
+                    layer.style.setProperty('visibility', 'visible', 'important');
+                });
+            }
+        """)
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+def _disable_css_animations(page):
+    try:
+        page.evaluate("""
+            () => {
+                const animated = document.querySelectorAll('.animate, .wow, [data-anim-type], [data-aos]');
+                animated.forEach(el => {
+                    el.classList.remove('animate', 'wow', 'animated', 'aos-animate');
+                    el.style.opacity = '1';
+                    el.style.visibility = 'visible';
+                    el.style.transform = 'none';
+                    el.style.transition = 'none';
+                    el.style.animation = 'none';
+                    el.removeAttribute('data-anim-type');
+                    el.removeAttribute('data-anim-delay');
+                    el.removeAttribute('data-anim-duration');
+                });
+                document.querySelectorAll('.image_frame .image_wrapper .image_links, .mask').forEach(el => {
+                    el.style.opacity = '1';
+                });
+                window.dispatchEvent(new Event('scroll'));
+                return new Promise(resolve => setTimeout(resolve, 100));
+            }
+        """)
+        page.wait_for_timeout(500)
+    except Exception as e:
+        print(f"   [animations fix warning] {e}")
+
+def _force_carousel_load_aggressive(page):
+    try:
+        for _ in range(10):
+            page.evaluate("""
+                () => {
+                    document.querySelectorAll(
+                        '.flickity-prev-next-button.next, .owl-next, .slick-next, .deeper-carousel-box .next'
+                    ).forEach(btn => { if (btn.click) btn.click(); });
+                }
+            """)
+            page.wait_for_timeout(500)
     except Exception:
         pass
 
@@ -394,22 +802,55 @@ def _do_cleanup(page, aggressive: bool):
     else:
         close_popups(page)
 
-def _navigate(page, url: str) -> bool:
-    try:
-        page.goto(url, wait_until='networkidle', timeout=60000)
-        return True
-    except Exception:
+def _navigate(page, url: str, retries: int = 2) -> Tuple[bool, str]:    
+    for attempt in range(1 + retries):
         try:
-            page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            page.goto(url, wait_until='networkidle', timeout=60000)
+            actual = page.url
+            return True, actual
+        except Exception:
+            if attempt < retries:
+                import time
+                time.sleep(3 * (attempt + 1))
+                continue
+            try:
+                page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                actual = page.url
+                return True, actual
+            except Exception as e:
+                print(f"   [NAV ERR] {e}")
+                return False, url
+
+def _take_screenshot(page, output_path: Path):
+    try:
+        page_height = page.evaluate("() => document.body.scrollHeight")
+    except Exception:
+        page_height = 0
+
+    if page_height > SCREENSHOT_MAX_HEIGHT:
+        print(f"   [!] strona ma {page_height}px — przycinam do {SCREENSHOT_MAX_HEIGHT}px")
+        try:
+            page.screenshot(
+                path=str(output_path),
+                clip={'x': 0, 'y': 0, 'width': 1440, 'height': SCREENSHOT_MAX_HEIGHT}
+            )
             return True
         except Exception as e:
-            print(f" [NAV ERR] {e}")
+            print(f"   [SHOT ERR clipped] {e}")
             return False
-
+    else:
+        try:
+            page.screenshot(path=str(output_path), full_page=True)
+            return True
+        except Exception as e:
+            print(f"   [SHOT ERR] {e}")
+            return False
 
 # ─── asset capture via network interception ───────────────────────────────────
 
 def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict, css_assets: dict):
+    fallback_queue = []
+
     def handle_response(response):
         try:
             req_url, _ = urldefrag(response.url)
@@ -425,23 +866,31 @@ def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict,
             ext = Path(parsed_path).suffix.lower()
             rt = response.request.resource_type
 
-            is_media_ct = any(t in content_type for t in ('image/', 'font/', 'text/css', 'javascript', 'audio/', 'video/'))
-            
-            if ext not in ASSET_EXTENSIONS and rt not in ('stylesheet', 'script', 'image', 'font', 'media') and not is_media_ct:
+            is_media_ct = any(t in content_type for t in (
+                'image/', 'font/', 'text/css', 'javascript', 'audio/', 'video/'
+            ))
+
+            if (ext not in ASSET_EXTENSIONS
+                    and rt not in ('stylesheet', 'script', 'image', 'font', 'media')
+                    and not is_media_ct):
                 return
 
-            body = response.body()
+            try:
+                body = response.body()
+            except Exception:
+                fallback_queue.append(req_url)
+                return
+
             if not body:
                 return
 
             local_rel, abs_path = url_to_local_path(req_url, assets_dir, fname_counts, content_type)
             abs_path.write_bytes(body)
             captured[req_url] = local_rel
-            
-            # Store CSS files for later URL rewriting
+
             if 'text/css' in content_type or ext == '.css':
                 css_assets[req_url] = (abs_path, body)
-            
+
             if response.url != req_url:
                 captured[response.url] = local_rel
                 if 'text/css' in content_type or ext == '.css':
@@ -450,40 +899,38 @@ def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict,
         except Exception:
             pass
 
+    handle_response.fallback_queue = fallback_queue
     return handle_response
-
 
 def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
     if not captured:
         return html
 
+    html = re.sub(r'<base\s+[^>]*?>', '', html, flags=re.IGNORECASE)
 
-    # Insert <base href="./"> BEFORE other rewrites so the url() loop below won't touch it.
-    if '<base ' not in html.lower():
-        html = html.replace('<head>', '<head>\n<base href="./">', 1)
-
-    # ── 1. Rewrite src/href/data-* attribute values ───────────────────────────
     attr_pat = re.compile(
-        r'(?P<attr>(?:src|href|data-src|data-bg|data-retina|data-lazy-src)'
-        r'\s*=\s*["\'\'])(?P<url>[^"\'\']+)(?P<end>["\'\'])',
+        r'(?P<attr>(?:src|href|poster|data-src|data-lazy-src|data-bg|data-bg-url|'
+        r'data-bg-image|data-retina|data-image)'
+        r'\s*=\s*["\'])(?P<url>[^"\']+)(?P<end>["\'])',
         re.IGNORECASE
     )
     srcset_pat = re.compile(
-        r'(?P<attr>srcset\s*=\s*["\'\'])(?P<val>[^"\'\']+)(?P<end>["\'\'])',
+        r'(?P<attr>(?:srcset|data-srcset|data-lazy-srcset)'
+        r'\s*=\s*["\'])(?P<val>[^"\']+)(?P<end>["\'])',
         re.IGNORECASE
     )
 
-    def _abs(url):
+    def _abs(u):
         try:
-            return urljoin(page_url, url)
+            return urljoin(page_url, u)
         except ValueError:
             return None
 
     def replacer(m):
-        attr, url, end = m.group('attr'), m.group('url'), m.group('end')
-        if url.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:', 'javascript:')):
+        attr, u, end = m.group('attr'), m.group('url'), m.group('end')
+        if u.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:', 'javascript:')):
             return m.group(0)
-        a = _abs(url)
+        a = _abs(u)
         if a and a in captured:
             return attr + captured[a] + end
         return m.group(0)
@@ -503,9 +950,6 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
     html = attr_pat.sub(replacer, html)
     html = srcset_pat.sub(replacer_srcset, html)
 
-    # ── 2. Rewrite absolute URLs inside url(...) anywhere in the HTML ─────────
-    # (covers inline style="background-image:url(https://...)" etc.)
-    # Sort longest-first to avoid partial matches.
     for original in sorted(captured, key=len, reverse=True):
         local = captured[original]
         if original == local:
@@ -517,9 +961,6 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
             html, flags=re.IGNORECASE
         )
 
-    # ── 3. Rewrite relative url() refs inside inline style attributes ─────────
-    # Playwright HTML-encodes quotes inside style as &quot; so we handle both
-    # raw quotes and &quot; variants.
     _url_in_style = re.compile(
         r'url\(\s*(?:&quot;|["\'\'])?([^"\'\')&\s]+)(?:&quot;|["\'\'])?\s*\)',
         re.IGNORECASE
@@ -531,10 +972,9 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
             return m.group(0)
         a = _abs(ref)
         if a and a in captured:
-            return 'url("' + captured[a] + '")' 
+            return 'url("' + captured[a] + '")'
         return m.group(0)
 
-    # Apply only inside style="..." (double or single quoted, or &quot; encoded)
     def _fix_style_attr(m):
         return m.group('pre') + _url_in_style.sub(_fix_style_url, m.group('val')) + m.group('post')
 
@@ -549,13 +989,7 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
 
     return html
 
-
 def _rewrite_single_css(css_text: str, css_url: str, captured: dict) -> tuple:
-    """
-    Rewrite url() and @import refs in one CSS string.
-    Returns (new_text, changed).
-    CSS files all live in assets/ - we reference siblings by filename only.
-    """
     url_pat = re.compile(r'url\(\s*(["\']?)([^\"\')\ s]+)\1\s*\)', re.IGNORECASE)
     imp_pat = re.compile(r'(@import\s+)(["\'])([^\"\']+)\2', re.IGNORECASE)
     changed = False
@@ -591,9 +1025,7 @@ def _rewrite_single_css(css_text: str, css_url: str, captured: dict) -> tuple:
     css_text = imp_pat.sub(repl_import, css_text)
     return css_text, changed
 
-
 def _rewrite_css_assets(css_assets: dict, captured: dict):
-    """Rewrite URLs inside all captured CSS files to point to local assets."""
     for css_url, (abs_path, original_body) in css_assets.items():
         try:
             css_text = original_body.decode('utf-8', errors='replace')
@@ -602,7 +1034,6 @@ def _rewrite_css_assets(css_assets: dict, captured: dict):
                 abs_path.write_text(new_css, encoding='utf-8', errors='replace')
         except Exception:
             pass
-
 
 def _convert_blobs_to_base64(page):
     try:
@@ -619,17 +1050,12 @@ def _convert_blobs_to_base64(page):
                             reader.readAsDataURL(blob);
                         });
                         img.src = base64;
-                    } catch (e) {
-                        console.error('Failed to convert blob img', e);
-                    }
+                    } catch (e) {}
                 }
-                
                 const elements = document.querySelectorAll('[style*="blob:"]');
                 elements.forEach(el => {
                     let style = el.getAttribute('style');
-                    style = style.replace(/url\(["']?blob:[^"'\)]+["']?\)/g, (match) => {
-                        return 'url(none)';
-                    });
+                    style = style.replace(/url\\(["']?blob:[^"')]+["']?\\)/g, 'url(none)');
                     el.setAttribute('style', style);
                 });
             }
@@ -637,29 +1063,16 @@ def _convert_blobs_to_base64(page):
     except Exception:
         pass
 
-
-
-# ─── fallback CSS asset fetcher ───────────────────────────────────────────────
-
 def _fetch_missing_css_assets(css_assets: dict, captured: dict, assets_dir: Path, fname_counts: dict, session: requests.Session):
-    """
-    After page load, scan all captured CSS files for url(...) references
-    that weren't captured by the network interceptor, and download them directly.
-    This catches fonts, images, etc. loaded only via CSS (e.g. Google Fonts @font-face).
-    """
-    url_pattern = re.compile(
-        r'url\(\s*["\']?([^"\')\s]+)["\']?\s*\)',
-        re.IGNORECASE
-    )
-    import_pattern_css = re.compile(
-        r'@import\s+["\']([^"\']+)["\']',
-        re.IGNORECASE
-    )
+    url_pattern = re.compile(r'url\(\s*["\']?([^"\')\s]+)["\']?\s*\)', re.IGNORECASE)
+    import_pattern_css = re.compile(r'@import\s+["\']([^"\']+)["\']', re.IGNORECASE)
 
     queue = list(css_assets.keys())
     visited_css = set(queue)
+    max_depth = 3
 
-    while queue:
+    while queue and max_depth > 0:
+        max_depth -= 1
         css_url = queue.pop(0)
         entry = css_assets.get(css_url)
         if entry is None:
@@ -699,110 +1112,213 @@ def _fetch_missing_css_assets(css_assets: dict, captured: dict, assets_dir: Path
             except Exception:
                 pass
 
-
 # ─── process functions ────────────────────────────────────────────────────────
 
-def process_full(url: str, context, output_dir: Path, aggressive: bool = False) -> tuple:
+def process_full(page_url: str, context, output_dir: Path, aggressive: bool = False,
+                 progress: str = '') -> tuple:
     assets_dir = output_dir / 'assets'
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     captured = {}
     fname_counts = {}
-    css_assets = {}  # url -> (abs_path, body) for CSS rewriting
+    css_assets = {}
 
-    # Session for fallback direct downloads (e.g. fonts/images referenced only in CSS)
     session = requests.Session()
     session.headers['User-Agent'] = NORMAL_USER_AGENT
 
-    _set_consent_cookies(context, url)
+    _set_consent_cookies(context, page_url)
     page = context.new_page()
-    page.on('response', _make_response_handler(assets_dir, captured, fname_counts, css_assets))
+    handler = _make_response_handler(assets_dir, captured, fname_counts, css_assets)
+    page.on('response', handler)
 
-    if not _navigate(page, url):
+    ok, actual_url = _navigate(page, page_url)
+    if not ok:
         page.close()
         return False, False
 
+    if actual_url != page_url:
+        print(f"   → redirect: {actual_url}")
+    else:
+        print(f"   → {actual_url}")
+
     _do_cleanup(page, aggressive)
     _scroll_and_wait(page)
-    
-    # NOWOŚĆ: Wymuszamy podmianę data-lazy-src na src zanim sprawdzimy czy obrazki się załadowały
+
     _force_lazy_load(page)
     _force_slider_render(page)
-    
+    _force_sr7_render(page)
+    _force_revslider_render(page)
+    _force_carousel_load_aggressive(page)
+
     _do_cleanup(page, aggressive)
+    _force_lazy_load(page)
+
     _wait_for_images(page)
     _wait_for_fonts(page)
+    _disable_css_animations(page)
 
     try:
-        page.wait_for_timeout(1000)
+        page.evaluate("""
+            () => {
+                document.querySelectorAll(
+                    '.flickity-page-dots .dot, .owl-dot, .slick-dots li'
+                ).forEach(dot => dot.click());
+            }
+        """)
+        page.wait_for_timeout(2000)
+        _wait_for_images(page, timeout=5000)
     except Exception:
         pass
 
+    try:
+        page.wait_for_load_state('networkidle', timeout=10000)
+    except Exception:
+        pass
+    page.wait_for_timeout(3000)
+
     _convert_blobs_to_base64(page)
+
+    for fallback_url in handler.fallback_queue:
+        if fallback_url in captured:
+            continue
+        try:
+            r = session.get(fallback_url, timeout=15)
+            if r.status_code == 200 and r.content:
+                ct = r.headers.get('content-type', '').lower()
+                local_rel, local_abs = url_to_local_path(fallback_url, assets_dir, fname_counts, ct)
+                local_abs.write_bytes(r.content)
+                captured[fallback_url] = local_rel
+                if 'text/css' in ct or urlparse(fallback_url).path.lower().endswith('.css'):
+                    css_assets[fallback_url] = (local_abs, r.content)
+        except Exception:
+            pass
 
     html_ok = False
     try:
         html = page.content()
-        html = _rewrite_html(html, captured, url)
+        html = _rewrite_html(html, captured, page_url)
         (output_dir / 'index.html').write_text(html, encoding='utf-8', errors='replace')
-        # Download any assets found in CSS but not captured during page load (e.g. @font-face, background images)
         _fetch_missing_css_assets(css_assets, captured, assets_dir, fname_counts, session)
-        # Rewrite URLs inside CSS files so fonts/images referenced from CSS also resolve locally
         _rewrite_css_assets(css_assets, captured)
+
+        try:
+            extra_images = page.evaluate("""
+                () => {
+                    const urls = new Set();
+                    document.querySelectorAll('[data-srcset], [data-lazy-srcset]').forEach(el => {
+                        let srcset = el.getAttribute('data-srcset') || el.getAttribute('data-lazy-srcset');
+                        if (srcset) {
+                            srcset.split(',').forEach(part => {
+                                let u = part.trim().split(' ')[0];
+                                if (u && (u.startsWith('http') || u.startsWith('//'))) {
+                                    if (u.startsWith('//')) u = 'https:' + u;
+                                    urls.add(u);
+                                }
+                            });
+                        }
+                        let bg = el.getAttribute('data-bg');
+                        if (bg) {
+                            if (bg.startsWith('//')) bg = 'https:' + bg;
+                            if (bg.startsWith('http')) urls.add(bg);
+                        }
+                    });
+                    return Array.from(urls);
+                }
+            """)
+            for img_url in extra_images:
+                if img_url not in captured:
+                    try:
+                        r = session.get(img_url, timeout=10)
+                        if r.status_code == 200 and r.content:
+                            local_rel, local_abs = url_to_local_path(
+                                img_url, assets_dir, fname_counts,
+                                r.headers.get('content-type', '')
+                            )
+                            local_abs.write_bytes(r.content)
+                            captured[img_url] = local_rel
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"   extra images warning: {e}")
+
         unique_assets = len(set(captured.values()))
         print(f"   assets: {unique_assets} files saved")
         html_ok = True
     except Exception as e:
         print(f"   [HTML ERR] {e}")
 
-    shot_ok = False
-    try:
-        page.screenshot(path=str(output_dir / 'screenshot_full.png'), full_page=True)
-        shot_ok = True
-    except Exception as e:
-        print(f"   [SHOT ERR] {e}")
+    shot_ok = _take_screenshot(page, output_dir / 'screenshot_full.png')
 
     page.close()
     return html_ok, shot_ok
 
-
-def process_screenshot_only(url: str, context, output_path: Path, aggressive: bool = False) -> bool:
-    _set_consent_cookies(context, url)
+def process_screenshot_only(page_url: str, context, output_path: Path,
+                            aggressive: bool = False, progress: str = '') -> bool:
+    _set_consent_cookies(context, page_url)
     page = context.new_page()
 
-    if not _navigate(page, url):
+    ok, actual_url = _navigate(page, page_url)
+    if not ok:
         page.close()
         return False
+
+    if actual_url != page_url:
+        print(f"   → redirect: {actual_url}")
+    else:
+        print(f"   → {actual_url}")
 
     _do_cleanup(page, aggressive)
     _scroll_and_wait(page)
-    
-    # NOWOŚĆ: To samo dla screenów
+
     _force_lazy_load(page)
     _force_slider_render(page)
-    
+    _force_sr7_render(page)
+    _force_revslider_render(page)
+    _force_carousel_load_aggressive(page)
     _do_cleanup(page, aggressive)
+    _force_lazy_load(page)
     _wait_for_images(page)
     _wait_for_fonts(page)
+    _disable_css_animations(page)
 
     try:
-        page.screenshot(path=str(output_path), full_page=True)
-        kb = output_path.stat().st_size // 1024
-        print(f"   saved  {output_path.name}  ({kb} KB)")
-        page.close()
-        return True
-    except Exception as e:
-        print(f"   [SHOT ERR] {e}")
-        page.close()
-        return False
+        page.evaluate("""
+            () => {
+                document.querySelectorAll(
+                    '.flickity-page-dots .dot, .owl-dot, .slick-dots li'
+                ).forEach(dot => dot.click());
+            }
+        """)
+        page.wait_for_timeout(2000)
+        _wait_for_images(page, timeout=5000)
+    except Exception:
+        pass
 
+    try:
+        page.wait_for_load_state('networkidle', timeout=10000)
+    except Exception:
+        pass
+    page.wait_for_timeout(3000)
+
+    shot_ok = _take_screenshot(page, output_path)
+    if shot_ok:
+        try:
+            kb = output_path.stat().st_size // 1024
+            print(f"   saved  {output_path.name}  ({kb} KB)")
+        except Exception:
+            pass
+
+    page.close()
+    return shot_ok
 
 # ─── zip helpers ──────────────────────────────────────────────────────────────
+
+SKIP_DIRS = {'__pycache__', '.git', '.svn', '.hg', 'node_modules', '.DS_Store', '.tox', '.venv', 'venv', '.mypy_cache'}
 
 def pack_dir_to_zip(src_dir: Path, zip_path: Path):
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for f in src_dir.rglob('*'):
-            if f.is_file():
+            if f.is_file() and not any(part in SKIP_DIRS for part in f.parts):
                 zf.write(f, f.relative_to(src_dir.parent))
     mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"  [ZIP]  {zip_path.name}  ({mb:.1f} MB)")
@@ -814,11 +1330,13 @@ def pack_files_to_zip(files: list, zip_path: Path):
     mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"  [ZIP]  {zip_path.name}  ({mb:.1f} MB)")
 
-
 # ─── main processing ──────────────────────────────────────────────────────────
 
 def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
-    normalized = [u if u.startswith(('http://', 'https://')) else 'https://' + u for u in urls]
+    normalized = [
+        u if u.startswith(('http://', 'https://')) else 'https://' + u
+        for u in urls
+    ]
 
     try:
         from playwright.sync_api import sync_playwright
@@ -828,92 +1346,17 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
         print("[!] Playwright not installed.")
         sys.exit(1)
 
-    aggressive = mode.startswith('clean-')
-    effective = mode.replace('clean-', '', 1)
-    mode_label = f"CLEAN + {effective.upper()}" if aggressive else effective.upper()
-
-    if effective == 'screenshots':
-        print(f"\n  mode  : {mode_label}")
-        print(f"  pages : {len(normalized)}\n")
-
-        by_domain = defaultdict(list)
-        for url in normalized:
-            by_domain[get_domain(url)].append(url)
-
-        tmp_dir = base_output / '_screenshots_tmp'
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        ok = fail = 0
-
-        for domain, domain_urls in by_domain.items():
-            print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
-            domain_shots = []
-
-            for url in domain_urls:
-                fname = get_screenshot_filename(url)
-                out_path = tmp_dir / fname
-                print(f"      >> {url}")
-                ctx = browser.new_context(
-                    viewport={'width': 1440, 'height': 900},
-                    bypass_csp=True,
-                    user_agent=NORMAL_USER_AGENT
-                )
-                success = process_screenshot_only(url, ctx, out_path, aggressive=aggressive)
-                ctx.close()
-                if success:
-                    domain_shots.append(out_path)
-                    ok += 1
-                else:
-                    fail += 1
-
-            if domain_shots:
-                zip_path = base_output / get_zip_name(domain)
-                pack_files_to_zip(domain_shots, zip_path)
-
-        shutil.rmtree(tmp_dir)
-        print(f"\n  done  : {ok} ok  /  {fail} failed")
-
-    else:
-        by_domain = defaultdict(list)
-        for url in normalized:
-            by_domain[get_domain(url)].append(url)
-
-        print(f"\n  mode    : {mode_label}")
-        print(f"  domains : {len(by_domain)}")
-        print(f"  pages   : {len(normalized)}\n")
-
-        for domain, domain_urls in by_domain.items():
-            zip_path = base_output / get_zip_name(domain)
-            domain_tmp = base_output / sanitize_name(domain)
-            domain_tmp.mkdir(parents=True, exist_ok=True)
-
-            print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
-
-            for url in domain_urls:
-                sub = get_subfolder_name(url)
-                page_dir = domain_tmp / sub
-                page_dir.mkdir(parents=True, exist_ok=True)
-                (page_dir / 'meta.txt').write_text(
-                    f"URL: {url}\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
-                    encoding='utf-8'
-                )
-                print(f"      -> {sub}/", end='  ')
-
-                ctx = browser.new_context(
-                    viewport={'width': 1440, 'height': 900},
-                    bypass_csp=True,
-                    user_agent=NORMAL_USER_AGENT
-                )
-                html_ok, shot_ok = process_full(url, ctx, page_dir, aggressive=aggressive)
-                ctx.close()
-
-                print('[OK]' if (html_ok or shot_ok) else '[FAIL]')
-
-            pack_dir_to_zip(domain_tmp, zip_path)
-            if not keep_folders:
-                shutil.rmtree(domain_tmp)
-
-    browser.close()
-    pw.stop()
+    try:
+        _run_inner(browser, normalized, base_output, mode, keep_folders)
+    finally:
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
 
     print("\n" + "─" * 50)
     print("  RESULTS")
@@ -934,6 +1377,111 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
                 print(f"      |-- {f}/")
     print()
 
+def _run_inner(browser, normalized, base_output, mode, keep_folders):
+    aggressive = mode.startswith('clean-')
+    effective = mode.replace('clean-', '', 1)
+    mode_label = f"CLEAN + {effective.upper()}" if aggressive else effective.upper()
+    total_pages = len(normalized)
+    logging.info(f"mode={mode_label} pages={total_pages} output={base_output}")
+
+    if effective == 'screenshots':
+        print(f"\n  mode  : {mode_label}")
+        print(f"  pages : {total_pages}\n")
+
+        by_domain = defaultdict(list)
+        for url in normalized:
+            by_domain[get_domain(url)].append(url)
+
+        tmp_dir = base_output / '_screenshots_tmp'
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        ok_count = fail_count = 0
+        page_counter = 0
+
+        for domain, domain_urls in by_domain.items():
+            print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
+            domain_shots = []
+
+            for url in domain_urls:
+                page_counter += 1
+                progress = f"[{page_counter}/{total_pages}]"
+                fname = get_screenshot_filename(url)
+                out_path = tmp_dir / fname
+                print(f"\n  {progress} {url}")
+                logging.info(f"[{page_counter}/{total_pages}] screenshot {url}")
+                ctx = browser.new_context(
+                    viewport={'width': 1440, 'height': 900},
+                    bypass_csp=True,
+                    user_agent=NORMAL_USER_AGENT
+                )
+                success = process_screenshot_only(url, ctx, out_path, aggressive=aggressive, progress=progress)
+                ctx.close()
+                if success:
+                    domain_shots.append(out_path)
+                    ok_count += 1
+                else:
+                    fail_count += 1
+                    print(f"   [FAIL]")
+                    logging.error(f"[FAIL] screenshot {url}")
+
+            if domain_shots:
+                zip_path = base_output / get_zip_name(domain, mode='screenshots')
+                pack_files_to_zip(domain_shots, zip_path)
+
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        print(f"\n  done  : {ok_count} ok  /  {fail_count} failed")
+        logging.info(f"done: {ok_count} ok, {fail_count} failed")
+        return
+
+    is_crawl = effective == 'crawl'
+
+    by_domain = defaultdict(list)
+    for url in normalized:
+        by_domain[get_domain(url)].append(url)
+
+    print(f"\n  mode    : {mode_label}")
+    print(f"  domains : {len(by_domain)}")
+    print(f"  pages   : {total_pages}\n")
+
+    page_counter = 0
+
+    for domain, domain_urls in by_domain.items():
+        zip_path = base_output / get_zip_name(domain, mode='crawl' if is_crawl else 'full')
+        domain_tmp = base_output / sanitize_name(domain)
+        domain_tmp.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
+        logging.info(f"domain={domain} pages={len(domain_urls)}")
+
+        for url in domain_urls:
+            page_counter += 1
+            progress = f"[{page_counter}/{total_pages}]"
+            sub = get_subfolder_name(url)
+            page_dir = domain_tmp / sub
+            page_dir.mkdir(parents=True, exist_ok=True)
+            (page_dir / 'meta.txt').write_text(
+                f"URL: {url}\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+                encoding='utf-8'
+            )
+            print(f"\n  {progress} {url}")
+            print(f"      -> {sub}/")
+            logging.info(f"[{page_counter}/{total_pages}] {url} -> {sub}/")
+
+            ctx = browser.new_context(
+                viewport={'width': 1440, 'height': 900},
+                bypass_csp=True,
+                user_agent=NORMAL_USER_AGENT
+            )
+            html_ok, shot_ok = process_full(url, ctx, page_dir, aggressive=aggressive, progress=progress)
+            ctx.close()
+
+            status = '[OK]' if (html_ok or shot_ok) else '[FAIL]'
+            print(f"   {status}")
+            logging.info(f"{status} html={html_ok} shot={shot_ok}")
+
+        pack_dir_to_zip(domain_tmp, zip_path)
+        if not keep_folders:
+            shutil.rmtree(domain_tmp)
 
 # ─── interactive prompt ───────────────────────────────────────────────────────
 
@@ -942,7 +1490,8 @@ def prompt_mode() -> tuple:
     print()
     print("    [1]  full              HTML + assets + screenshots")
     print("    [2]  screenshots       screenshots only  (fast)")
-    print("    [3]  clean             aggressive popup nuke, then choose ↓")
+    print("    [3]  crawl             auto-discover pages from sitemap + links")
+    print("    [4]  clean             aggressive popup nuke, then choose ↓")
     print()
     while True:
         try:
@@ -955,12 +1504,15 @@ def prompt_mode() -> tuple:
             return 'full', False
         if choice in ('2', 'screenshots', 'ss'):
             return 'screenshots', False
-        if choice in ('3', 'clean'):
+        if choice in ('3', 'crawl'):
+            return 'crawl', False
+        if choice in ('4', 'clean'):
             print()
             print("  clean mode — after nuking popups:")
             print()
             print("    [1]  full          HTML + assets + screenshots")
             print("    [2]  screenshots   screenshots only")
+            print("    [3]  crawl         auto-discover pages")
             print()
             while True:
                 try:
@@ -972,8 +1524,10 @@ def prompt_mode() -> tuple:
                     return 'full', True
                 if sub in ('2', 'screenshots', 'ss'):
                     return 'screenshots', True
-                print("  [?] type 1 or 2")
-        print("  [?] type 1, 2 or 3")
+                if sub in ('3', 'crawl'):
+                    return 'crawl', True
+                print("  [?] type 1, 2 or 3")
+        print("  [?] type 1, 2, 3 or 4")
 
 def prompt_urls() -> list:
     print()
@@ -1041,7 +1595,7 @@ def prompt_output() -> Path:
 def main():
     print(BANNER)
 
-    VALID_MODES = ('full', 'screenshots', 'clean-full', 'clean-screenshots')
+    VALID_MODES = ('full', 'screenshots', 'crawl', 'clean-full', 'clean-screenshots', 'clean-crawl')
 
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser(description='snap.py — web snapshot tool')
@@ -1050,6 +1604,7 @@ def main():
         parser.add_argument('-o', '--output', default='./results')
         parser.add_argument('--mode', choices=VALID_MODES, default='full')
         parser.add_argument('--keep-folders', action='store_true')
+        parser.add_argument('--max-pages', type=int, default=50, help='Max pages for crawl mode')
         args = parser.parse_args()
         urls = list(args.urls)
         if args.file:
@@ -1062,19 +1617,61 @@ def main():
                     line = line.strip()
                     if line and not line.startswith('#'):
                         urls.append(line)
+
+        effective = args.mode.replace('clean-', '', 1)
+
+        if effective == 'crawl':
+            if not urls:
+                print("[!] Provide at least one URL to crawl from.")
+                sys.exit(1)
+            session = requests.Session()
+            session.headers['User-Agent'] = NORMAL_USER_AGENT
+            print(f"\n  [*] discovering URLs...")
+            all_crawl_urls = []
+            for seed_url in urls:
+                seed_url = seed_url if seed_url.startswith(('http://', 'https://')) else 'https://' + seed_url
+                print(f"      sitemap + crawl: {seed_url}")
+                sm_urls = fetch_sitemap_urls(seed_url, session)
+                cr_urls = crawl_internal_links(seed_url, session, max_pages=args.max_pages)
+                combined = list(dict.fromkeys(sm_urls + cr_urls))
+                print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}, total: {len(combined)}")
+                all_crawl_urls.extend(combined)
+            urls = list(dict.fromkeys(all_crawl_urls))
+
         if not urls:
-            print("[!] Provide at least one URL.")
+            print("[!] No URLs found.")
             sys.exit(1)
         seen = set()
         unique = [u for u in urls if not (u in seen or seen.add(u))]
         out = Path(args.output).expanduser()
         out.mkdir(parents=True, exist_ok=True)
+        log_path = setup_logging(out)
+        print(f"  log: {log_path}")
         run(unique, out, mode=args.mode, keep_folders=args.keep_folders)
         return
 
     effective, aggressive = prompt_mode()
     mode = f"clean-{effective}" if aggressive else effective
     urls = prompt_urls()
+
+    if effective == 'crawl':
+        if not urls:
+            print("[!] Provide at least one seed URL.")
+            sys.exit(0)
+        session = requests.Session()
+        session.headers['User-Agent'] = NORMAL_USER_AGENT
+        print(f"\n  [*] discovering URLs...")
+        all_crawl_urls = []
+        for seed_url in urls:
+            seed_url = seed_url if seed_url.startswith(('http://', 'https://')) else 'https://' + seed_url
+            print(f"      sitemap + crawl: {seed_url}")
+            sm_urls = fetch_sitemap_urls(seed_url, session)
+            cr_urls = crawl_internal_links(seed_url, session, max_pages=50)
+            combined = list(dict.fromkeys(sm_urls + cr_urls))
+            print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}, total: {len(combined)}")
+            all_crawl_urls.extend(combined)
+        urls = list(dict.fromkeys(all_crawl_urls))
+
     out = prompt_output()
 
     seen = set()
@@ -1087,6 +1684,9 @@ def main():
     print(f"  pages  : {len(unique)}")
     print(f"  output : {out.resolve()}")
     print(f"  {'─'*44}\n")
+
+    log_path = setup_logging(out)
+    print(f"  log: {log_path}")
 
     run(unique, out, mode=mode)
 
