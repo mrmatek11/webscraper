@@ -723,17 +723,19 @@ def _disable_css_animations(page):
     try:
         page.evaluate("""
             () => {
-                const animated = document.querySelectorAll('.animate, .wow, [data-anim-type], [data-aos]');
-                animated.forEach(el => {
-                    el.classList.remove('animate', 'wow', 'animated', 'aos-animate');
-                    el.style.opacity = '1';
-                    el.style.visibility = 'visible';
-                    el.style.transform = 'none';
-                    el.style.transition = 'none';
-                    el.style.animation = 'none';
-                    el.removeAttribute('data-anim-type');
-                    el.removeAttribute('data-anim-delay');
-                    el.removeAttribute('data-anim-duration');
+                const skip = 'header, nav, footer, [role="dialog"], [aria-hidden="true"], '
+                    + '.cookie-banner, .modal, .popup, .tooltip, .dropdown, .submenu, '
+                    + 'script, style, noscript, .nav__menu';
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.closest(skip)) return;
+                    const s = window.getComputedStyle(el);
+                    if (parseFloat(s.opacity) < 0.1 && s.display !== 'none') {
+                        el.style.setProperty('opacity', '1', 'important');
+                        el.style.setProperty('visibility', 'visible', 'important');
+                        el.style.setProperty('transform', 'none', 'important');
+                        el.style.setProperty('transition', 'none', 'important');
+                        el.style.setProperty('animation', 'none', 'important');
+                    }
                 });
                 document.querySelectorAll('.image_frame .image_wrapper .image_links, .mask').forEach(el => {
                     el.style.opacity = '1';
