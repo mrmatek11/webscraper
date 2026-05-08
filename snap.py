@@ -762,6 +762,107 @@ def _force_carousel_load_aggressive(page):
     except Exception:
         pass
 
+def _force_elementor_render(page):
+    try:
+        page.evaluate("""
+            () => {
+                document.querySelectorAll('.elementor-invisible').forEach(el => {
+                    el.classList.remove('elementor-invisible', 'elementor-animation-fadeIn',
+                        'elementor-animation-fadeInUp', 'elementor-animation-fadeInDown',
+                        'elementor-animation-fadeInLeft', 'elementor-animation-fadeInRight',
+                        'elementor-animation-slideInUp', 'elementor-animation-slideInDown',
+                        'elementor-animation-slideInLeft', 'elementor-animation-slideInRight',
+                        'elementor-animation-zoomIn', 'elementor-animation-bounceIn',
+                        'elementor-animation-pulse', 'elementor-animation-bob',
+                        'elementor-animation-grow');
+                    el.style.setProperty('opacity', '1', 'important');
+                    el.style.setProperty('visibility', 'visible', 'important');
+                    el.style.setProperty('transform', 'none', 'important');
+                    el.style.setProperty('transition', 'none', 'important');
+                    el.style.setProperty('animation', 'none', 'important');
+                });
+
+                if (typeof elementorFrontend !== 'undefined' && elementorFrontend.elementsHandler) {
+                    try {
+                        elementorFrontend.elementsHandler.init();
+                    } catch(e) {}
+                }
+
+                if (typeof elementorFrontend !== 'undefined' && elementorFrontend.utils) {
+                    document.querySelectorAll(
+                        '.elementor-element:not(.elementor-element-edit-mode)'
+                    ).forEach(el => {
+                        try {
+                            const obs = new IntersectionObserver((entries) => {
+                                entries.forEach(entry => {
+                                    if (entry.isIntersecting) {
+                                        entry.target.classList.remove('elementor-hidden',
+                                            'elementor-screen-only');
+                                        obs.unobserve(entry.target);
+                                    }
+                                });
+                            }, { threshold: 0 });
+                            obs.observe(el);
+                        } catch(e) {}
+                    });
+                }
+
+                document.querySelectorAll(
+                    '[data-elementor-type="wp-post"], [data-elementor-type="wp-page"]'
+                ).forEach(wrap => {
+                    const sections = wrap.querySelectorAll(
+                        '.elementor-section, .elementor-widget'
+                    );
+                    sections.forEach(el => {
+                        el.classList.remove('elementor-invisible');
+                        if (getComputedStyle(el).opacity === '0') {
+                            el.style.setProperty('opacity', '1', 'important');
+                            el.style.setProperty('visibility', 'visible', 'important');
+                        }
+                    });
+                });
+            }
+        """)
+    except Exception:
+        pass
+
+    try:
+        step = 400
+        dist = page.evaluate("() => Math.min(document.body.scrollHeight, 20000)")
+        page.evaluate(f"""
+            () => new Promise(resolve => {{
+                let scrolled = 0;
+                const timer = setInterval(() => {{
+                    window.scrollBy(0, {step});
+                    scrolled += {step};
+                    if (scrolled >= {dist}) {{
+                        clearInterval(timer);
+                        window.scrollTo(0, 0);
+                        resolve();
+                    }}
+                }}, 80);
+                setTimeout(() => {{ clearInterval(timer); window.scrollTo(0, 0); resolve(); }}, 15000);
+            }})
+        """, timeout=20000)
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+
+    try:
+        page.evaluate("""
+            () => {
+                document.querySelectorAll('.elementor-invisible').forEach(el => {
+                    el.classList.remove('elementor-invisible');
+                    el.style.setProperty('opacity', '1', 'important');
+                    el.style.setProperty('visibility', 'visible', 'important');
+                    el.style.setProperty('transform', 'none', 'important');
+                });
+            }
+        """)
+        page.wait_for_timeout(500)
+    except Exception:
+        pass
+
 def _wait_for_images(page, timeout=5000):
     try:
         page.wait_for_function("""
@@ -803,6 +904,29 @@ def _do_cleanup(page, aggressive: bool):
         close_popups_aggressive(page)
     else:
         close_popups(page)
+
+def _inject_early_fixes(page):
+    try:
+        page.add_style_tag(content="""
+            .elementor-invisible,
+            .elementor-invisible.elementor-element,
+            .elementor-widget.elementor-invisible {
+                opacity: 1 !important;
+                visibility: visible !important;
+                transform: none !important;
+                animation: none !important;
+                transition: none !important;
+                display: inherit !important;
+            }
+            .lazyload, .lazyloading {
+                opacity: 1 !important;
+            }
+            .elementor-background-slideshow {
+                min-height: 100vh !important;
+            }
+        """)
+    except Exception:
+        pass
 
 def _navigate(page, url: str, retries: int = 2) -> Tuple[bool, str]:    
     for attempt in range(1 + retries):
@@ -904,9 +1028,27 @@ def _make_response_handler(assets_dir: Path, captured: dict, fname_counts: dict,
     handle_response.fallback_queue = fallback_queue
     return handle_response
 
+def _normalize_url_for_lookup(url: str) -> str:
+    if url.startswith('http://'):
+        return 'https://' + url[7:]
+    return url
+
+
+def _build_normalized_captured(captured: dict) -> dict:
+    norm = {}
+    for url, local in captured.items():
+        norm[url] = local
+        n = _normalize_url_for_lookup(url)
+        if n not in norm:
+            norm[n] = local
+    return norm
+
+
 def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
     if not captured:
         return html
+
+    norm_captured = _build_normalized_captured(captured)
 
     html = re.sub(r'<base\s+[^>]*?>', '', html, flags=re.IGNORECASE)
 
@@ -928,13 +1070,23 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
         except ValueError:
             return None
 
+    def _lookup(a):
+        if a and a in norm_captured:
+            return norm_captured[a]
+        if a:
+            n = _normalize_url_for_lookup(a)
+            if n in norm_captured:
+                return norm_captured[n]
+        return None
+
     def replacer(m):
         attr, u, end = m.group('attr'), m.group('url'), m.group('end')
         if u.startswith(('data:', 'blob:', '#', 'mailto:', 'tel:', 'javascript:')):
             return m.group(0)
         a = _abs(u)
-        if a and a in captured:
-            return attr + captured[a] + end
+        loc = _lookup(a)
+        if loc:
+            return attr + loc + end
         return m.group(0)
 
     def replacer_srcset(m):
@@ -944,8 +1096,9 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
             tokens = part.strip().split()
             if tokens:
                 a = _abs(tokens[0])
-                if a and a in captured:
-                    tokens[0] = captured[a]
+                loc = _lookup(a)
+                if loc:
+                    tokens[0] = loc
             parts.append(' '.join(tokens))
         return attr + ', '.join(parts) + end
 
@@ -962,6 +1115,14 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
             lambda m, loc=local: 'url(' + m.group(1) + loc + m.group(2) + ')',
             html, flags=re.IGNORECASE
         )
+        norm_orig = _normalize_url_for_lookup(original)
+        if norm_orig != original:
+            esc_n = re.escape(norm_orig)
+            html = re.sub(
+                r'url\((["\'\']?)' + esc_n + r'(["\'\']?)\)',
+                lambda m, loc=local: 'url(' + m.group(1) + loc + m.group(2) + ')',
+                html, flags=re.IGNORECASE
+            )
 
     _url_in_style = re.compile(
         r'url\(\s*(?:&quot;|["\'\'])?([^"\'\')&\s]+)(?:&quot;|["\'\'])?\s*\)',
@@ -973,8 +1134,9 @@ def _rewrite_html(html: str, captured: dict, page_url: str) -> str:
         if ref.startswith(('data:', 'blob:', '#')):
             return m.group(0)
         a = _abs(ref)
-        if a and a in captured:
-            return 'url("' + captured[a] + '")'
+        loc = _lookup(a)
+        if loc:
+            return 'url("' + loc + '")'
         return m.group(0)
 
     def _fix_style_attr(m):
@@ -1138,6 +1300,8 @@ def process_full(page_url: str, context, output_dir: Path, aggressive: bool = Fa
         page.close()
         return False, False
 
+    _inject_early_fixes(page)
+
     if actual_url != page_url:
         print(f"   → redirect: {actual_url}")
     else:
@@ -1158,6 +1322,7 @@ def process_full(page_url: str, context, output_dir: Path, aggressive: bool = Fa
     _wait_for_images(page)
     _wait_for_fonts(page)
     _disable_css_animations(page)
+    _force_elementor_render(page)
 
     try:
         page.evaluate("""
@@ -1207,41 +1372,94 @@ def process_full(page_url: str, context, output_dir: Path, aggressive: bool = Fa
             extra_images = page.evaluate("""
                 () => {
                     const urls = new Set();
+                    const addUrl = (u) => {
+                        if (!u) return;
+                        if (u.startsWith('//')) u = 'https:' + u;
+                        if (u.startsWith('http')) urls.add(u);
+                    };
+                    document.querySelectorAll('[srcset]').forEach(el => {
+                        (el.getAttribute('srcset') || '').split(',').forEach(part => {
+                            addUrl(part.trim().split(' ')[0]);
+                        });
+                    });
                     document.querySelectorAll('[data-srcset], [data-lazy-srcset]').forEach(el => {
                         let srcset = el.getAttribute('data-srcset') || el.getAttribute('data-lazy-srcset');
                         if (srcset) {
                             srcset.split(',').forEach(part => {
-                                let u = part.trim().split(' ')[0];
-                                if (u && (u.startsWith('http') || u.startsWith('//'))) {
-                                    if (u.startsWith('//')) u = 'https:' + u;
-                                    urls.add(u);
-                                }
+                                addUrl(part.trim().split(' ')[0]);
                             });
                         }
-                        let bg = el.getAttribute('data-bg');
-                        if (bg) {
-                            if (bg.startsWith('//')) bg = 'https:' + bg;
-                            if (bg.startsWith('http')) urls.add(bg);
+                    });
+                    document.querySelectorAll('[data-bg], [data-lazy-bg], [data-bg-url]').forEach(el => {
+                        addUrl(el.getAttribute('data-bg') || el.getAttribute('data-lazy-bg') || el.getAttribute('data-bg-url'));
+                    });
+                    document.querySelectorAll('img[src^="http"]').forEach(img => {
+                        addUrl(img.getAttribute('src'));
+                    });
+                    document.querySelectorAll('[style*="background-image"]').forEach(el => {
+                        const style = el.getAttribute('style') || '';
+                        const m = style.match(/url\\(['"]?([^'")]+)['"]?\\)/g);
+                        if (m) m.forEach(match => {
+                            const u = match.replace(/url\\(['"]?/, '').replace(/['"]?\\)/, '');
+                            addUrl(u);
+                        });
+                    });
+                    document.querySelectorAll('[data-settings]').forEach(el => {
+                        try {
+                            const raw = el.getAttribute('data-settings');
+                            if (!raw) return;
+                            const decoded = raw.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+                            const data = JSON.parse(decoded);
+                            const extract = (obj) => {
+                                if (typeof obj === 'string' && (obj.includes('.png') || obj.includes('.jpg') || obj.includes('.jpeg') || obj.includes('.gif') || obj.includes('.webp') || obj.includes('.svg') || obj.includes('.avif'))) {
+                                    addUrl(obj);
+                                }
+                                if (obj && typeof obj === 'object') {
+                                    if (Array.isArray(obj)) obj.forEach(extract);
+                                    else Object.values(obj).forEach(extract);
+                                }
+                            };
+                            extract(data);
+                        } catch(e) {}
+                    });
+                    document.querySelectorAll('.elementor-background-slideshow__slide__image').forEach(el => {
+                        const bg = getComputedStyle(el).backgroundImage;
+                        if (bg && bg !== 'none') {
+                            const m = bg.match(/url\\(["']?(.+?)["']?\\)/);
+                            if (m) addUrl(m[1]);
                         }
                     });
                     return Array.from(urls);
                 }
             """)
             for img_url in extra_images:
-                if img_url not in captured:
-                    try:
-                        r = session.get(img_url, timeout=10)
-                        if r.status_code == 200 and r.content:
-                            local_rel, local_abs = url_to_local_path(
-                                img_url, assets_dir, fname_counts,
-                                r.headers.get('content-type', '')
-                            )
-                            local_abs.write_bytes(r.content)
-                            captured[img_url] = local_rel
-                    except Exception:
-                        pass
+                nurl = _normalize_url_for_lookup(img_url)
+                if nurl not in captured and img_url not in captured:
+                    for try_url in (nurl, img_url):
+                        if try_url in captured:
+                            break
+                        try:
+                            r = session.get(try_url, timeout=10)
+                            if r.status_code == 200 and r.content:
+                                local_rel, local_abs = url_to_local_path(
+                                    try_url, assets_dir, fname_counts,
+                                    r.headers.get('content-type', '')
+                                )
+                                local_abs.write_bytes(r.content)
+                                captured[try_url] = local_rel
+                                if try_url != img_url:
+                                    captured[img_url] = local_rel
+                                break
+                        except Exception:
+                            pass
         except Exception as e:
             print(f"   extra images warning: {e}")
+
+        try:
+            html = _rewrite_html(html, captured, page_url)
+            (output_dir / 'index.html').write_text(html, encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
         unique_assets = len(set(captured.values()))
         print(f"   assets: {unique_assets} files saved")
@@ -1264,6 +1482,8 @@ def process_screenshot_only(page_url: str, context, output_path: Path,
         page.close()
         return False
 
+    _inject_early_fixes(page)
+
     if actual_url != page_url:
         print(f"   → redirect: {actual_url}")
     else:
@@ -1282,6 +1502,7 @@ def process_screenshot_only(page_url: str, context, output_path: Path,
     _wait_for_images(page)
     _wait_for_fonts(page)
     _disable_css_animations(page)
+    _force_elementor_render(page)
 
     try:
         page.evaluate("""
