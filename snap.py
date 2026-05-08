@@ -19,14 +19,17 @@ Nowe z v3:
 """
 
 import argparse
+import configparser
 import logging
 import re
 import shutil
 import sys
+import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple
@@ -73,10 +76,63 @@ NORMAL_USER_AGENT = (
     "Chrome/121.0.0.0 Safari/537.36"
 )
 
-SCREENSHOT_MAX_HEIGHT = 15000
+SCREENSHOT_MAX_HEIGHT = 15000  # nadpisywane przez load_config()
 
 _log_file = None
 _log_handler = None
+
+# ─── konfiguracja ─────────────────────────────────────────────────────────────
+
+_CONFIG_DEFAULTS = {
+    'performance': {'workers': '1'},
+    'browser': {
+        'viewport_width':        '1440',
+        'viewport_height':       '900',
+        'max_screenshot_height': '15000',
+    },
+    'crawl': {'max_pages': '50'},
+}
+
+_CFG = {}  # wypelniane przez load_config()
+
+
+def load_config(cfg_path=None):
+    """Wczytuje snap.cfg; jesli brak pliku - uzywa defaults."""
+    global _CFG, SCREENSHOT_MAX_HEIGHT
+
+    parser = configparser.ConfigParser()
+    for section, values in _CONFIG_DEFAULTS.items():
+        parser[section] = values
+
+    search_paths = [
+        cfg_path,
+        Path('snap.cfg'),
+        Path(__file__).parent / 'snap.cfg',
+    ]
+    loaded_from = None
+    for p in search_paths:
+        if p is not None and Path(p).exists():
+            parser.read(p, encoding='utf-8')
+            loaded_from = Path(p)
+            break
+
+    _CFG = {
+        'workers':               parser.getint('performance', 'workers'),
+        'viewport_width':        parser.getint('browser',     'viewport_width'),
+        'viewport_height':       parser.getint('browser',     'viewport_height'),
+        'max_screenshot_height': parser.getint('browser',     'max_screenshot_height'),
+        'max_pages':             parser.getint('crawl',       'max_pages'),
+    }
+
+    SCREENSHOT_MAX_HEIGHT = _CFG['max_screenshot_height']
+
+    if loaded_from:
+        print(f"  [cfg] wczytano: {loaded_from.resolve()}  (workers={_CFG['workers']})")
+    else:
+        print(f"  [cfg] snap.cfg nie znaleziony - uzywa defaults  (workers={_CFG['workers']})")
+
+    return _CFG
+
 
 
 def setup_logging(output_dir: Path):
@@ -1555,31 +1611,32 @@ def pack_files_to_zip(files: list, zip_path: Path):
 
 # ─── main processing ──────────────────────────────────────────────────────────
 
+def _make_browser():
+    """Tworzy własną instancję Playwright + Chromium. Każdy wątek wywołuje osobno."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[!] Playwright not installed.")
+        sys.exit(1)
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=True)
+    return pw, browser
+
+
 def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
     normalized = [
         u if u.startswith(('http://', 'https://')) else 'https://' + u
         for u in urls
     ]
 
+    # Sprawdź czy Playwright w ogóle działa zanim odpalimy workery
     try:
-        from playwright.sync_api import sync_playwright
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True)
+        from playwright.sync_api import sync_playwright  # noqa: F401
     except ImportError:
         print("[!] Playwright not installed.")
         sys.exit(1)
 
-    try:
-        _run_inner(browser, normalized, base_output, mode, keep_folders)
-    finally:
-        try:
-            browser.close()
-        except Exception:
-            pass
-        try:
-            pw.stop()
-        except Exception:
-            pass
+    _run_inner(normalized, base_output, mode, keep_folders)
 
     print("\n" + "─" * 50)
     print("  RESULTS")
@@ -1600,16 +1657,34 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
                 print(f"      |-- {f}/")
     print()
 
-def _run_inner(browser, normalized, base_output, mode, keep_folders):
+def _run_inner(normalized, base_output, mode, keep_folders):
     aggressive = mode.startswith('clean-')
     effective = mode.replace('clean-', '', 1)
     mode_label = f"CLEAN + {effective.upper()}" if aggressive else effective.upper()
     total_pages = len(normalized)
-    logging.info(f"mode={mode_label} pages={total_pages} output={base_output}")
+    workers = _CFG.get('workers', 1)
+    vw = _CFG.get('viewport_width', 1440)
+    vh = _CFG.get('viewport_height', 900)
+    logging.info(f"mode={mode_label} pages={total_pages} workers={workers} output={base_output}")
 
+    _print_lock = threading.Lock()
+    _counter_lock = threading.Lock()
+    _page_counter = [0]
+
+    def _safe_print(*args, **kwargs):
+        with _print_lock:
+            print(*args, **kwargs)
+
+    def _next_progress():
+        with _counter_lock:
+            _page_counter[0] += 1
+            return f"[{_page_counter[0]}/{total_pages}]"
+
+    # ── tryb screenshots ───────────────────────────────────────────────────────
     if effective == 'screenshots':
-        print(f"\n  mode  : {mode_label}")
-        print(f"  pages : {total_pages}\n")
+        _safe_print(f"\n  mode    : {mode_label}")
+        _safe_print(f"  pages   : {total_pages}")
+        _safe_print(f"  workers : {workers}\n")
 
         by_domain = defaultdict(list)
         for url in normalized:
@@ -1617,68 +1692,90 @@ def _run_inner(browser, normalized, base_output, mode, keep_folders):
 
         tmp_dir = base_output / '_screenshots_tmp'
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        ok_count = fail_count = 0
-        page_counter = 0
 
-        for domain, domain_urls in by_domain.items():
-            print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
-            domain_shots = []
+        ok_count_ref = [0]
+        fail_count_ref = [0]
+        domain_shots_map = defaultdict(list)
+        shots_lock = threading.Lock()
 
-            for url in domain_urls:
-                page_counter += 1
-                progress = f"[{page_counter}/{total_pages}]"
-                fname = get_screenshot_filename(url)
-                out_path = tmp_dir / fname
-                print(f"\n  {progress} {url}")
-                logging.info(f"[{page_counter}/{total_pages}] screenshot {url}")
+        def _worker_screenshot(url):
+            domain = get_domain(url)
+            progress = _next_progress()
+            fname = get_screenshot_filename(url)
+            out_path = tmp_dir / fname
+            _safe_print(f"\n  {progress} {url}")
+            logging.info(f"{progress} screenshot {url}")
+            # Każdy wątek dostaje własny Playwright + przeglądarkę
+            pw, browser = _make_browser()
+            try:
                 ctx = browser.new_context(
-                    viewport={'width': 1440, 'height': 900},
+                    viewport={'width': vw, 'height': vh},
                     bypass_csp=True,
                     user_agent=NORMAL_USER_AGENT
                 )
-                success = process_screenshot_only(url, ctx, out_path, aggressive=aggressive, progress=progress)
-                ctx.close()
+                try:
+                    success = process_screenshot_only(url, ctx, out_path, aggressive=aggressive, progress=progress)
+                finally:
+                    ctx.close()
+            finally:
+                browser.close()
+                pw.stop()
+            with shots_lock:
                 if success:
-                    domain_shots.append(out_path)
-                    ok_count += 1
+                    domain_shots_map[domain].append(out_path)
+                    ok_count_ref[0] += 1
                 else:
-                    fail_count += 1
-                    print(f"   [FAIL]")
+                    fail_count_ref[0] += 1
+                    _safe_print(f"   [FAIL] {url}")
                     logging.error(f"[FAIL] screenshot {url}")
+            return url, success
 
-            if domain_shots:
+        all_urls = [u for domain_urls in by_domain.values() for u in domain_urls]
+        for domain in by_domain:
+            _safe_print(f"\n  [*] {domain}  ({len(by_domain[domain])} pages)")
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_worker_screenshot, url): url for url in all_urls}
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception as exc:
+                    _safe_print(f"   [ERR] {futures[f]}: {exc}")
+                    logging.error(f"[ERR] {futures[f]}: {exc}")
+
+        for domain, shots in domain_shots_map.items():
+            if shots:
                 zip_path = base_output / get_zip_name(domain, mode='screenshots')
-                pack_files_to_zip(domain_shots, zip_path)
+                pack_files_to_zip(shots, zip_path)
 
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
-        print(f"\n  done  : {ok_count} ok  /  {fail_count} failed")
-        logging.info(f"done: {ok_count} ok, {fail_count} failed")
+        _safe_print(f"\n  done  : {ok_count_ref[0]} ok  /  {fail_count_ref[0]} failed")
+        logging.info(f"done: {ok_count_ref[0]} ok, {fail_count_ref[0]} failed")
         return
 
+    # ── tryb full / crawl ──────────────────────────────────────────────────────
     is_crawl = effective == 'crawl'
 
     by_domain = defaultdict(list)
     for url in normalized:
         by_domain[get_domain(url)].append(url)
 
-    print(f"\n  mode    : {mode_label}")
-    print(f"  domains : {len(by_domain)}")
-    print(f"  pages   : {total_pages}\n")
-
-    page_counter = 0
+    _safe_print(f"\n  mode    : {mode_label}")
+    _safe_print(f"  domains : {len(by_domain)}")
+    _safe_print(f"  pages   : {total_pages}")
+    _safe_print(f"  workers : {workers}\n")
 
     for domain, domain_urls in by_domain.items():
         zip_path = base_output / get_zip_name(domain, mode='crawl' if is_crawl else 'full')
         domain_tmp = base_output / sanitize_name(domain)
         domain_tmp.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
+        _safe_print(f"\n  [*] {domain}  ({len(domain_urls)} pages)")
         logging.info(f"domain={domain} pages={len(domain_urls)}")
 
-        for url in domain_urls:
-            page_counter += 1
-            progress = f"[{page_counter}/{total_pages}]"
+        def _worker_full(url, domain_tmp=domain_tmp):
+            progress = _next_progress()
             sub = get_subfolder_name(url)
             page_dir = domain_tmp / sub
             page_dir.mkdir(parents=True, exist_ok=True)
@@ -1686,21 +1783,37 @@ def _run_inner(browser, normalized, base_output, mode, keep_folders):
                 f"URL: {url}\nDate: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
                 encoding='utf-8'
             )
-            print(f"\n  {progress} {url}")
-            print(f"      -> {sub}/")
-            logging.info(f"[{page_counter}/{total_pages}] {url} -> {sub}/")
-
-            ctx = browser.new_context(
-                viewport={'width': 1440, 'height': 900},
-                bypass_csp=True,
-                user_agent=NORMAL_USER_AGENT
-            )
-            html_ok, shot_ok = process_full(url, ctx, page_dir, aggressive=aggressive, progress=progress)
-            ctx.close()
-
+            _safe_print(f"\n  {progress} {url}")
+            _safe_print(f"      -> {sub}/")
+            logging.info(f"{progress} {url} -> {sub}/")
+            # Każdy wątek dostaje własny Playwright + przeglądarkę
+            pw, browser = _make_browser()
+            try:
+                ctx = browser.new_context(
+                    viewport={'width': vw, 'height': vh},
+                    bypass_csp=True,
+                    user_agent=NORMAL_USER_AGENT
+                )
+                try:
+                    html_ok, shot_ok = process_full(url, ctx, page_dir, aggressive=aggressive, progress=progress)
+                finally:
+                    ctx.close()
+            finally:
+                browser.close()
+                pw.stop()
             status = '[OK]' if (html_ok or shot_ok) else '[FAIL]'
-            print(f"   {status}")
+            _safe_print(f"   {status}")
             logging.info(f"{status} html={html_ok} shot={shot_ok}")
+            return html_ok, shot_ok
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_worker_full, url): url for url in domain_urls}
+            for f in as_completed(futures):
+                try:
+                    f.result()
+                except Exception as exc:
+                    _safe_print(f"   [ERR] {futures[f]}: {exc}")
+                    logging.error(f"[ERR] {futures[f]}: {exc}")
 
         pack_dir_to_zip(domain_tmp, zip_path)
         if not keep_folders:
@@ -1827,8 +1940,13 @@ def main():
         parser.add_argument('-o', '--output', default='./results')
         parser.add_argument('--mode', choices=VALID_MODES, default='full')
         parser.add_argument('--keep-folders', action='store_true')
-        parser.add_argument('--max-pages', type=int, default=50, help='Max pages for crawl mode')
+        parser.add_argument('--max-pages', type=int, default=None, help='Max pages for crawl mode (nadpisuje snap.cfg)')
+        parser.add_argument('--config', default=None, help='Sciezka do pliku konfiguracyjnego (domyslnie: snap.cfg)')
         args = parser.parse_args()
+
+        load_config(args.config)
+        if args.max_pages is not None:
+            _CFG['max_pages'] = args.max_pages
         urls = list(args.urls)
         if args.file:
             fp = Path(args.file)
@@ -1873,6 +1991,7 @@ def main():
         run(unique, out, mode=args.mode, keep_folders=args.keep_folders)
         return
 
+    load_config()
     effective, aggressive = prompt_mode()
     mode = f"clean-{effective}" if aggressive else effective
     urls = prompt_urls()
@@ -1889,7 +2008,7 @@ def main():
             seed_url = seed_url if seed_url.startswith(('http://', 'https://')) else 'https://' + seed_url
             print(f"      sitemap + crawl: {seed_url}")
             sm_urls = fetch_sitemap_urls(seed_url, session)
-            cr_urls = crawl_internal_links(seed_url, session, max_pages=50)
+            cr_urls = crawl_internal_links(seed_url, session, max_pages=_CFG.get('max_pages', 50))
             combined = list(dict.fromkeys(sm_urls + cr_urls))
             print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}, total: {len(combined)}")
             all_crawl_urls.extend(combined)
