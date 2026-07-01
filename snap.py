@@ -659,6 +659,92 @@ def close_popups_aggressive(page):
         if attempt < 3:
             page.wait_for_timeout(1000)
 
+
+# ─── #K: final sweep tuż przed screenshotem ───────────────────────────────────
+# Dwa niezależne źródła ucinania screenshotów, oba naprawiane tutaj:
+#
+#   1) SPÓŹNIONE POPUPY/MODALE — wiele cookie/consent managerów (Cookiebot,
+#      OneTrust, customerPrivacy na Webwave itd.) pokazuje się z OPÓŹNIENIEM
+#      (setTimeout 2-5s, albo dopiero po networkidle) — czyli PO tym jak
+#      close_popups() zdążył już zadziałać na początku _prepare_page().
+#      Taki modal blokuje scroll i renderuje się nad resztą strony.
+#
+#   2) "BODY JAKO WŁASNY SCROLL-CONTAINER" — sporo nowoczesnych builderów
+#      (m.in. Webwave, niektóre Webflow/SPA layouty) ustawia <body> na
+#      height:100vh + overflow-y:auto zamiast pozwolić rosnąć całemu
+#      dokumentowi. document.body.scrollHeight wtedy poprawnie pokazuje
+#      pełną wysokość treści, ALE document.documentElement (czyli faktyczny
+#      "page" w oczach Playwrighta przy full_page=True) zostaje zablokowany
+#      na wysokości viewportu — więc screenshot łapie tylko to, co mieściło
+#      się w oryginalnym oknie, a reszta wychodzi jako biała pustka, mimo że
+#      cała treść jest poprawnie w DOM. To główna przyczyna ucinanych
+#      screenshotów i dotyczy wielu różnych stron, nie tylko jednej.
+#
+# Funkcja jest bezpieczna i idempotentna — nic nie usuwa z właściwej treści,
+# tylko (a) jeszcze raz zamyka popupy, (b) resetuje typowe scroll-lock style,
+# (c) geometrycznie chowa pełnoekranowe nakładki niezależnie od nazw klas,
+# (d) wymusza naturalną (nieucinaną) wysokość html/body na potrzeby
+# screenshotu — wywoływana tuż przed _take_screenshot(), już PO zapisaniu
+# HTML-a, więc nie wpływa na zapisany index.html.
+def _final_overlay_sweep(page):
+    try:
+        page.evaluate("""
+            () => {
+                ['overflow', 'overflowY', 'overflowX', 'position', 'top', 'height', 'paddingRight']
+                    .forEach(p => {
+                        document.documentElement.style[p] = '';
+                        document.body.style[p] = '';
+                    });
+                document.body.classList.remove('modal-open', 'no-scroll', 'overflow-hidden', 'scroll-lock');
+                document.documentElement.classList.remove('no-scroll', 'overflow-hidden', 'scroll-lock');
+            }
+        """)
+    except Exception:
+        pass
+
+    try:
+        close_popups(page)
+    except Exception:
+        pass
+
+    try:
+        page.evaluate("""
+            () => {
+                const vw = window.innerWidth, vh = window.innerHeight;
+                document.querySelectorAll('body *').forEach(el => {
+                    const style = window.getComputedStyle(el);
+                    if (style.position !== 'fixed' && style.position !== 'sticky') return;
+                    if (style.display === 'none' || style.visibility === 'hidden') return;
+                    const r = el.getBoundingClientRect();
+                    if (r.width < vw * 0.6 || r.height < vh * 0.6) return;
+                    if (el.closest('header, nav, footer')) return;
+                    el.style.setProperty('display', 'none', 'important');
+                });
+            }
+        """)
+    except Exception:
+        pass
+
+    # punkt (d): wymuś naturalną wysokość — naprawia "body jako własny scroll-container"
+    try:
+        page.evaluate("""
+            () => {
+                document.documentElement.style.setProperty('height', 'auto', 'important');
+                document.documentElement.style.setProperty('overflow', 'visible', 'important');
+                document.body.style.setProperty('height', 'auto', 'important');
+                document.body.style.setProperty('min-height', '100%', 'important');
+                document.body.style.setProperty('overflow-y', 'visible', 'important');
+                document.body.style.setProperty('overflow-x', 'hidden', 'important');
+            }
+        """)
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
 # ─── #C: rozszerzony lazy loader ──────────────────────────────────────────────
 
 def _force_lazy_load(page):
@@ -2201,6 +2287,7 @@ def process_full(page_url: str, context, output_dir: Path, aggressive: bool = Fa
     except Exception as e:
         print(f"   [HTML ERR] {e}")
 
+    _final_overlay_sweep(page)
     shot_ok = _take_screenshot(page, output_dir / 'screenshot_full.png')
 
     _run_diagnostics(page, page_url)
@@ -2226,6 +2313,7 @@ def process_screenshot_only(page_url: str, context, output_path: Path,
 
     _prepare_page(page, aggressive)
 
+    _final_overlay_sweep(page)
     shot_ok = _take_screenshot(page, output_path)
     if shot_ok:
         try:
