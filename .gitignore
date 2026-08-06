@@ -1,2 +1,1 @@
-*.ipynb_checkpoints
-**/.ipynb_checkpoints/*
+Nothing should be ignored based on the provided file changes. The only added file is a Jupyter notebook (.ipynb), which is a source file that should be tracked in version control. No build artifacts, dependencies, or temporary files are present in the changes.
