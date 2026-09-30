@@ -96,8 +96,9 @@ _log_handler = None
 _CONFIG_DEFAULTS = {
     'performance': {'workers': '1', 'block_analytics': 'true'},
     'browser': {
-        'viewport_width':        '1440',
-        'viewport_height':       '900',
+        'viewport_width':        '1920',
+        'viewport_height':       '1080',
+        'device_scale_factor':   '1',
         'max_screenshot_height': '15000',
     },
     'crawl': {'max_pages': '50'},
@@ -130,6 +131,7 @@ def load_config(cfg_path=None):
         'block_analytics':       parser.getboolean('performance', 'block_analytics', fallback=True),
         'viewport_width':        parser.getint('browser',     'viewport_width'),
         'viewport_height':       parser.getint('browser',     'viewport_height'),
+        'device_scale_factor':   parser.getfloat('browser',   'device_scale_factor'),
         'max_screenshot_height': parser.getint('browser',     'max_screenshot_height'),
         'max_pages':             parser.getint('crawl',       'max_pages'),
     }
@@ -375,6 +377,14 @@ def fetch_sitemap_urls(base_url: str, session: requests.Session) -> list:
     return found
 
 
+def _find_loc(element, ns: str):
+    # Uwaga: Element bez dzieci jest "falsy", więc `find(...) or find(...)` nie działa
+    loc = element.find(f'{ns}loc')
+    if loc is None:
+        loc = element.find('loc')
+    return loc
+
+
 def _parse_sitemap_xml(xml_text: str, origin: str) -> list:
     urls = []
     try:
@@ -387,7 +397,7 @@ def _parse_sitemap_xml(xml_text: str, origin: str) -> list:
         ns = root.tag.split('}')[0] + '}'
 
     for sm_element in root.findall(f'{ns}sitemap') + root.findall('sitemap'):
-        loc = sm_element.find(f'{ns}loc') or sm_element.find('loc')
+        loc = _find_loc(sm_element, ns)
         if loc is not None and loc.text:
             sm_url = loc.text.strip()
             try:
@@ -398,7 +408,7 @@ def _parse_sitemap_xml(xml_text: str, origin: str) -> list:
                 pass
 
     for url_element in root.findall(f'{ns}url') + root.findall('url'):
-        loc = url_element.find(f'{ns}loc') or url_element.find('loc')
+        loc = _find_loc(url_element, ns)
         if loc is not None and loc.text:
             url = loc.text.strip()
             if url.startswith(origin):
@@ -452,6 +462,26 @@ def crawl_internal_links(page_url: str, session: requests.Session, max_pages: in
             found_urls.add(clean)
 
     return sorted(found_urls)
+
+def discover_urls(seed_urls: list, max_pages: int = 50) -> list:
+    """Tryb crawl: zbiera podstrony z sitemap.xml + linków wewnętrznych."""
+    session = requests.Session()
+    session.headers['User-Agent'] = NORMAL_USER_AGENT
+    print(f"\n  [*] discovering URLs...")
+    all_crawl_urls = []
+    for seed_url in seed_urls:
+        seed_url = seed_url if seed_url.startswith(('http://', 'https://')) else 'https://' + seed_url
+        print(f"      sitemap + crawl: {seed_url}")
+        sm_urls = fetch_sitemap_urls(seed_url, session)
+        cr_urls = crawl_internal_links(seed_url, session, max_pages=max_pages)
+        combined = [seed_url] + sm_urls + cr_urls
+        print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}")
+        all_crawl_urls.extend(combined)
+    # sitemap zwraca "/o-nas/", crawler "/o-nas" — to ta sama strona (i ten sam folder)
+    unique = {}
+    for u in all_crawl_urls:
+        unique.setdefault(u.rstrip('/'), u)
+    return list(unique.values())
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -638,13 +668,27 @@ def close_popups(page):
                     '[id*="cookie-banner"], [id*="cookiebar"], [id*="cookie-notice"], ' +
                     '[id*="cookiePopup"], .ww_cookie_info, #cookiesEU-box'
                 ).forEach(el => el.remove());
-                document.querySelectorAll('*').forEach(el => {
+                // Wysoki z-index sam w sobie NIE oznacza popupu — buildery typu
+                // Webwave pozycjonują absolutnie całą treść (często z dużym z-indexem).
+                // Chowamy tylko: fixed zasłaniające większość ekranu, albo elementy
+                // wyglądające na popup po nazwie/roli.
+                const vw = window.innerWidth, vh = window.innerHeight;
+                const POPUP_RE = /cookie|consent|gdpr|rodo|popup|modal|newsletter|lightbox|dialog|backdrop/i;
+                document.querySelectorAll('body *').forEach(el => {
                     const style = window.getComputedStyle(el);
                     if (style.position !== 'fixed' && style.position !== 'absolute') return;
                     const zIndex = parseInt(style.zIndex) || 0;
                     if (zIndex <= 1000) return;
                     if (el.closest('header, footer, nav, main, [id*="homepage"], [id*="sidebar"]')) return;
-                    el.style.setProperty('display', 'none', 'important');
+                    const cls = typeof el.className === 'string' ? el.className : '';
+                    const named = POPUP_RE.test(el.id + ' ' + cls) ||
+                                  el.getAttribute('role') === 'dialog' ||
+                                  el.getAttribute('aria-modal') === 'true';
+                    const r = el.getBoundingClientRect();
+                    const covers = r.width >= vw * 0.5 && r.height >= vh * 0.5;
+                    if (named || (style.position === 'fixed' && covers)) {
+                        el.style.setProperty('display', 'none', 'important');
+                    }
                 });
             }
         """)
@@ -711,10 +755,13 @@ def _final_overlay_sweep(page):
         page.evaluate("""
             () => {
                 const vw = window.innerWidth, vh = window.innerHeight;
+                // tylko fixed nad treścią (z-index >= 100) — sticky jest w normalnym
+                // flow strony, a fixed z niskim z-indexem to zwykle tło/parallax
                 document.querySelectorAll('body *').forEach(el => {
                     const style = window.getComputedStyle(el);
-                    if (style.position !== 'fixed' && style.position !== 'sticky') return;
+                    if (style.position !== 'fixed') return;
                     if (style.display === 'none' || style.visibility === 'hidden') return;
+                    if ((parseInt(style.zIndex) || 0) < 100) return;
                     const r = el.getBoundingClientRect();
                     if (r.width < vw * 0.6 || r.height < vh * 0.6) return;
                     if (el.closest('header, nav, footer')) return;
@@ -737,6 +784,35 @@ def _final_overlay_sweep(page):
                 document.body.style.setProperty('overflow-x', 'hidden', 'important');
             }
         """)
+    except Exception:
+        pass
+
+    # punkt (e): strona scrolluje się w wewnętrznym wrapperze (div na cały ekran
+    # z overflow:auto) — rozwiń go, inaczej full_page złapie tylko 1 ekran
+    try:
+        expanded = page.evaluate("""
+            () => {
+                const vw = window.innerWidth, vh = window.innerHeight;
+                let n = 0;
+                document.querySelectorAll('body *').forEach(el => {
+                    const s = window.getComputedStyle(el);
+                    if (!/(auto|scroll)/.test(s.overflowY)) return;
+                    if (el.clientHeight < vh * 0.8 || el.clientWidth < vw * 0.8) return;
+                    if (el.scrollHeight <= el.clientHeight + 50) return;
+                    let a = el;
+                    while (a && a !== document.documentElement) {
+                        a.style.setProperty('height', 'auto', 'important');
+                        a.style.setProperty('max-height', 'none', 'important');
+                        a.style.setProperty('overflow', 'visible', 'important');
+                        a = a.parentElement;
+                    }
+                    n++;
+                });
+                return n;
+            }
+        """)
+        if expanded:
+            logging.info(f"[snap] rozwinięto {expanded} wewnętrzny(ch) scroll-container(ów)")
     except Exception:
         pass
 
@@ -1654,16 +1730,22 @@ def _navigate(page, url: str, retries: int = 2) -> Tuple[bool, str]:
 def _take_screenshot(page, output_path: Path):
     max_h = _CFG.get('max_screenshot_height', 15000)
     try:
-        page_height = page.evaluate("() => document.body.scrollHeight")
+        page_height, page_width = page.evaluate("""() => [
+            Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+            document.documentElement.clientWidth,
+        ]""")
     except Exception:
-        page_height = 0
+        page_height, page_width = 0, _CFG.get('viewport_width', 1920)
 
     if page_height > max_h:
         print(f"   [!] strona ma {page_height}px — przycinam do {max_h}px")
         try:
+            # full_page=True jest konieczne — bez niego Playwright przycina clip
+            # do widocznego okna i zapisuje tylko pierwszy ekran
             page.screenshot(
                 path=str(output_path),
-                clip={'x': 0, 'y': 0, 'width': _CFG.get('viewport_width', 1440), 'height': max_h}
+                full_page=True,
+                clip={'x': 0, 'y': 0, 'width': page_width, 'height': max_h}
             )
             return True
         except Exception as e:
@@ -2367,14 +2449,30 @@ def _get_thread_browser():
             print("[!] Playwright not installed. pip install playwright && playwright install chromium")
             sys.exit(1)
         _thread_local.pw = sync_playwright().start()
-        _thread_local.browser = _thread_local.pw.chromium.launch(
+        launch_kwargs = dict(
             headless=True,
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
             ],
         )
+        # channel='chromium' = pełny Chromium w "nowym" trybie headless — renderuje
+        # identycznie jak zwykła przeglądarka. Domyślny headless-shell (Playwright
+        # >= 1.49) to okrojona wersja, która potrafi renderować inaczej.
+        try:
+            _thread_local.browser = _thread_local.pw.chromium.launch(channel='chromium', **launch_kwargs)
+        except Exception:
+            _thread_local.browser = _thread_local.pw.chromium.launch(**launch_kwargs)
     return _thread_local.browser
+
+
+def _user_agent_for(browser) -> str:
+    """UA zwykłego Chrome na Windows z wersją zgodną z uruchomioną przeglądarką."""
+    try:
+        major = browser.version.split('.')[0]
+        return NORMAL_USER_AGENT.replace('Chrome/121.0.0.0', f'Chrome/{major}.0.0.0')
+    except Exception:
+        return NORMAL_USER_AGENT
 
 
 def _close_thread_browser():
@@ -2408,13 +2506,13 @@ def _make_context(browser=None):
     b = browser or _get_thread_browser()
     ctx = b.new_context(
         viewport={
-            'width':  _CFG.get('viewport_width',  1440),
-            'height': _CFG.get('viewport_height', 900),
+            'width':  _CFG.get('viewport_width',  1920),
+            'height': _CFG.get('viewport_height', 1080),
         },
         bypass_csp=True,
-        user_agent=NORMAL_USER_AGENT,
+        user_agent=_user_agent_for(b),
         reduced_motion='reduce',
-        device_scale_factor=1,
+        device_scale_factor=_CFG.get('device_scale_factor', 1),
         color_scheme='light',
         locale='pl-PL',
     )
@@ -2740,19 +2838,7 @@ def main():
             if not urls:
                 print("[!] Provide at least one URL to crawl from.")
                 sys.exit(1)
-            session = requests.Session()
-            session.headers['User-Agent'] = NORMAL_USER_AGENT
-            print(f"\n  [*] discovering URLs...")
-            all_crawl_urls = []
-            for seed_url in urls:
-                seed_url = seed_url if seed_url.startswith(('http://', 'https://')) else 'https://' + seed_url
-                print(f"      sitemap + crawl: {seed_url}")
-                sm_urls = fetch_sitemap_urls(seed_url, session)
-                cr_urls = crawl_internal_links(seed_url, session, max_pages=_CFG.get('max_pages', 50))
-                combined = list(dict.fromkeys(sm_urls + cr_urls))
-                print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}, total: {len(combined)}")
-                all_crawl_urls.extend(combined)
-            urls = list(dict.fromkeys(all_crawl_urls))
+            urls = discover_urls(urls, _CFG.get('max_pages', 50))
 
         if not urls:
             print("[!] No URLs found.")
@@ -2775,19 +2861,7 @@ def main():
         if not urls:
             print("[!] Provide at least one seed URL.")
             sys.exit(0)
-        session = requests.Session()
-        session.headers['User-Agent'] = NORMAL_USER_AGENT
-        print(f"\n  [*] discovering URLs...")
-        all_crawl_urls = []
-        for seed_url in urls:
-            seed_url = seed_url if seed_url.startswith(('http://', 'https://')) else 'https://' + seed_url
-            print(f"      sitemap + crawl: {seed_url}")
-            sm_urls = fetch_sitemap_urls(seed_url, session)
-            cr_urls = crawl_internal_links(seed_url, session, max_pages=_CFG.get('max_pages', 50))
-            combined = list(dict.fromkeys(sm_urls + cr_urls))
-            print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}, total: {len(combined)}")
-            all_crawl_urls.extend(combined)
-        urls = list(dict.fromkeys(all_crawl_urls))
+        urls = discover_urls(urls, _CFG.get('max_pages', 50))
 
     out = prompt_output()
 

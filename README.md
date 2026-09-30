@@ -1,318 +1,205 @@
-# snap.py — Web Snapshot Tool v4.1
+# 📸 snap.py — screenshoty i backupy stron
 
-**Narzędzie do robienia pełnych backupów stron internetowych.**
-Zapisuje HTML + wszystkie zasoby (CSS, JS, obrazki, fonty) + screenshoty do ZIP-a.
-Gotowe do użycia przez webmasterów — szybki backup przed zmianami na stronie klienta.
+Robi **screenshot całej strony** (od góry do dołu) i/lub **pełną kopię strony** (HTML, obrazki, style, fonty).
+Wszystko pakuje do pliku ZIP.
 
-```
-██████  ███▄    █  ▄▄▄       ██▓███
-▒██    ▒  ██ ▀█   █ ▒████▄    ▓██░  ██▒
-░ ▓██▄   ▓██  ▀█ ██▒▒██  ▀█▄  ▓██░ ██▓▒
-  ▒   ██▒▓██▒  ▐▌██▒░██▄▄▄▄██ ▒██▄█▓▒ ▒
-▒██████▒▒▒██░   ▓██░ ▓█   ▓██▒▒██▒ ░  ░
-░  ▒▓▒ ▒ ░░ ▒░   ▒ ▒  ▒▒   ▓▒█░▒▓▒░ ░  ░
-░ ░▒  ░ ░░ ░░   ░ ▒░  ▒   ▒▒ ░░▒ ░
-░  ░  ░     ░   ░ ░   ░   ▒   ░░
-      ░           ░       ░  ░
-  [ web snapshot tool v4.1 ]
-```
+Do czego to jest: **przed** zmianami na stronie klienta robisz backup, **po** zmianach robisz drugi i porównujesz.
 
 ---
 
-## Funkcje
+## 🟢 Sposób 1: Google Colab (najprostszy, nic nie instalujesz)
 
-- **Full backup** — zapisuje kompletną stronę: HTML, CSS, JS, obrazki, fonty, screenshot
-- **Screenshots only** — szybkie screenshoty całych stron (1440px wide)
-- **Crawl mode** — automatycznie odkrywa wszystkie podstrony z `sitemap.xml` + linki wewnętrzne
-- **Slider Revolution support** — obsługa SR7 i RevSlider 6 (wymusza renderowanie tła)
-- **Lazy load bypass** — wymusza ładowanie obrazków leniwych (`data-src`, `data-lazy`, `srcset`, `data-lazy-load-src`, `data-lazy-background-image`, `data-bg-image`)
-- **Cookie consent** — automatycznie akceptuje cookie banery (wielojęzyczne: PL, EN, DE, FR, ES, IT i inne)
-- **Anti-popup** — zamyka overlaye, modale, newslettery, themify popupy
-- **Animation killer** — wyłącza animacje CSS, JS (AOS, WOW, GSAP, anime.js, Elementor, Divi, Beaver Builder, Pixfort) przez `add_init_script()` + `document.getAnimations().finish()`
-- **IntersectionObserver hijack** — wymusza natychmiastowe wywołanie callbacków IO (scroll-triggered content)
-- **Fullpage scroll defuse** — neutralizuje fullpage.js i Locomotive Scroll
-- **Blob → base64** — konwertuje blob URL-e na base64 inline
-- **Route blocking** — blokuje analytics/tracking requesty dla szybkości
-- **Multi-threaded crawl** — osobny browser per wątek (thread-safe)
-- **Auto retry** — ponawia nawigację przy timeoutach CDN
-- **Logging** — zapisuje log do pliku obok wyników
-- **Webwave support** — obsługa data-ww_rwd, cookiePopup i innych specyficznych elementów Webwave
+Potrzebujesz tylko przeglądarki i konta Google.
 
-## Tryby pracy
+### Krok 1: Otwórz notebook
 
-| Tryb | CLI flag | Opis |
-|------|----------|------|
-| **Full backup** | `--mode full` | HTML + assets + screenshot każdej strony |
-| **Screenshots** | `--mode screenshots` | Same screenshoty (PNG) |
-| **Crawl** | `--mode crawl` | Automatyczne odkrywanie stron (sitemap + linki wewnętrzne) |
-| **Clean full** | `--mode clean-full` | Full backup + agresywne zamykanie popupów |
-| **Clean screenshots** | `--mode clean-screenshots` | Screenshots + agresywne zamykanie popupów |
-| **Clean crawl** | `--mode clean-crawl` | Crawl + agresywne zamykanie popupów |
+Kliknij ten przycisk:
 
-## Prefixy ZIP
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mrmatek11/webscraper/blob/main/snap_colab_optimized.ipynb)
 
-Pliki ZIP są oznaczone prefiksem dla łatwej identyfikacji:
+Otworzy się strona z kilkoma szarymi blokami (to są „komórki”).
+Każdą komórkę uruchamiasz, klikając **▶ (trójkąt)** po jej lewej stronie.
 
-| Prefix | Tryb | Zawartość |
-|--------|------|-----------|
-| `FULL_` | full / clean-full | HTML + assets + screenshot każdej strony |
-| `CRAWL_` | crawl / clean-crawl | To samo co full, ale strony odkryte automatycznie |
-| `SCREENSHOTS_` | screenshots / clean-screenshots | Same screenshoty (PNG) |
+> Jeśli wyskoczy okienko „Ten notatnik nie został utworzony przez Google”, kliknij **Uruchom mimo to**.
 
----
+### Krok 2: Instalacja
 
-## Instalacja
+Kliknij ▶ przy komórce **„1. Instalacja”**.
+Poczekaj ok. 1–2 minuty, aż pojawi się ✅.
 
-### Wymagania
+### Krok 3: Pobierz skrypt
 
-- Python 3.8+
-- Chromium (instalowany automatycznie przez Playwright)
+Kliknij ▶ przy komórce **„2. Pobierz snap.py”**.
+Niczego tu nie zmieniaj, zostaw `main`.
 
-### Szybka instalacja
+### Krok 4: Wpisz strony i ustawienia
 
-```bash
-git clone https://github.com/mrmatek11/webscraper.git
-cd webscraper
-bash install.sh
-```
+W komórce **„3. Ustawienia i start”**:
 
-### Ręczna instalacja
+1. Między `"""` a `"""` wklej adresy stron, **każdy w nowej linii**:
+   ```
+   URL_LIST = """
+   https://tono.com.pl
+   https://tono.com.pl/kontakt
+   """
+   ```
+   Linię możesz wyłączyć, dopisując `#` na początku.
 
-```bash
-pip install -r requirements.txt
-playwright install chromium
-```
+2. Z listy **MODE** wybierz, co ma zrobić:
 
-### Zależności
+   | Wybierz | Kiedy |
+   |---|---|
+   | `screenshots` | Chcesz tylko screeny (najszybsze). **Do „przed i po” to wystarczy.** |
+   | `full` | Chcesz screen + pełną kopię strony (HTML, obrazki itd.). |
+   | `crawl` | Podajesz tylko stronę główną, a skrypt sam znajdzie wszystkie podstrony. |
+   | `clean-...` | To samo co wyżej, ale mocniej zamyka popupy i cookies. Użyj, gdy na screenie wisi jakiś baner. |
 
-```
-playwright>=1.40.0
-requests>=2.28.0
-```
+3. W polu **LABEL** wpisz `przed` albo `po`. Pliki trafią do osobnych folderów.
+
+4. Resztę zostaw. (VIEWPORT `1920x1080` + SCALE `1` = zwykły monitor Full HD.)
+
+5. Kliknij ▶. Zobaczysz postęp `[1/5] ... [2/5] ...`. Poczekaj, aż pojawi się `done`.
+
+### Krok 5: Pobierz wyniki
+
+Kliknij ▶ przy komórce **„4. Wyniki”**. Przeglądarka pobierze pliki ZIP.
+
+> Jeśli przeglądarka zapyta „Zezwolić na pobieranie wielu plików?”, kliknij **Zezwól**.
+> Chcesz, żeby pliki trafiły od razu na Google Drive? Zaznacz ☑ `COPY_TO_DRIVE` przed kliknięciem ▶.
+
+### Robienie „przed i po”
+
+1. Przed zmianami: przejdź kroki 1–5 z `LABEL = przed`.
+2. Wprowadź zmiany na stronie.
+3. Po zmianach: w kroku 4 zmień na `LABEL = po`, kliknij ▶, potem krok 5.
+   (Kroków 1–3 nie trzeba powtarzać, jeśli karta Colaba jest nadal otwarta.)
 
 ---
 
-## Użycie
+## 🔵 Sposób 2: na własnym komputerze
 
-### Interaktywnie (menu)
+### Instalacja (raz)
 
-```bash
-python3 snap.py
+1. Zainstaluj **Python** ze strony https://www.python.org/downloads/.
+   Na Windowsie podczas instalacji **zaznacz ☑ „Add Python to PATH”**.
+2. Pobierz ten projekt: zielony przycisk **Code → Download ZIP** na GitHubie, potem rozpakuj.
+3. Otwórz terminal w rozpakowanym folderze:
+   - **Windows:** wejdź do folderu, kliknij w pasek adresu u góry, wpisz `cmd`, Enter.
+   - **Mac:** kliknij folder prawym → **Nowy terminal w folderze**.
+4. Wpisz (i poczekaj, aż skończy):
+   ```
+   pip install -r requirements.txt
+   python -m playwright install chromium
+   ```
+
+### Użycie
+
+Najprościej: wpisz
+
+```
+python snap.py
 ```
 
-Uruchomi menu z wyborem trybu i source URL-i.
+i odpowiadaj na pytania (wybór trybu → skąd adresy → gdzie zapisać).
 
-### CLI
+Albo jednym poleceniem:
 
-```bash
-# Full backup jednej strony
-python3 snap.py https://example.com
-
-# Full backup — output do custom folderu
-python3 snap.py https://example.com -o ./backup
-
-# Screenshots only
-python3 snap.py https://example.com --mode screenshots
-
-# Crawl — automatyczne odkrywanie stron
-python3 snap.py https://example.com --mode crawl
-
-# Crawl z limitem stron
-python3 snap.py https://example.com --mode crawl --max-pages 30
-
-# Z pliku z listą URL-i
-python3 snap.py -f lista_stron.txt --mode full
-
-# Full backup + agresywne zamykanie popupów
-python3 snap.py https://example.com --mode clean-full
-
-# Zachowaj foldery (nie usuwaj po spakowaniu)
-python3 snap.py https://example.com --keep-folders
-
-# Własny plik konfiguracyjny
-python3 snap.py https://example.com -c /sciezka/do/snap.cfg
+```
+python snap.py https://tono.com.pl --mode screenshots
 ```
 
-### Parametry CLI
+Wiele stron naraz: wpisz adresy do pliku `lista_stron.txt` (jeden w linii) i:
 
-| Parametr | Opis | Domyślnie |
-|----------|------|-----------|
-| `urls` | URL-e do zrobienia backupu | — |
-| `-f, --file` | Plik z listą URL-i (jeden na linię, `#` to komentarz) | — |
-| `-o, --output` | Folder na wyniki | `./results` |
-| `--mode` | `full`, `screenshots`, `crawl`, `clean-full`, `clean-screenshots`, `clean-crawl` | `full` |
-| `--max-pages` | Limit stron w crawl mode | `50` (z snap.cfg) |
-| `--keep-folders` | Nie usuwaj folderów po spakowaniu do ZIP | off |
-| `-c, --config` | Ścieżka do pliku konfiguracyjnego snap.cfg | auto-detect |
+```
+python snap.py -f lista_stron.txt --mode screenshots
+```
+
+Gotowe pliki ZIP są w folderze **`results`**.
+
+> Na Macu/Linuksie zamiast `python` może być potrzebne `python3`.
 
 ---
 
-## Konfiguracja (snap.cfg)
+## 📦 Co jest w ZIP-ie
 
-Plik `snap.cfg` w katalogu projektu pozwala dostosować parametry bez podawania ich w CLI:
+| Plik zaczyna się od | Zawartość |
+|---|---|
+| `SCREENSHOTS_...zip` | Same screeny PNG, jeden na podstronę |
+| `FULL_...zip` | Folder na każdą podstronę: `index.html` (kopia strony), `screenshot_full.png`, `assets/` (obrazki, CSS, fonty) |
+| `CRAWL_...zip` | To samo co FULL, ale dla wszystkich znalezionych podstron |
+
+Kopię strony otwierasz, klikając dwa razy `index.html` w rozpakowanym folderze.
+
+---
+
+## ❓ Coś nie działa
+
+| Problem | Co zrobić |
+|---|---|
+| Na screenie wisi baner cookies / popup | Użyj trybu `clean-screenshots` albo `clean-full` |
+| Screen jest ucięty na dole | Zwiększ `MAX_SCREENSHOT_HEIGHT` (Colab) albo `max_screenshot_height` w `snap.cfg` |
+| Colab: `ModuleNotFoundError` / „No module named snap” | Uruchom ponownie kroki 1 i 2 |
+| Colab się zawiesza / „Your session crashed” | Zmniejsz `WORKERS` do 1–2 |
+| Brakuje jakiegoś elementu na screenie | Zapisz adres strony i zgłoś, a my to poprawimy |
+| Strona w ogóle się nie otwiera (Cloudflare, logowanie) | Tego narzędzie nie obejdzie |
+
+---
+
+## ⚙️ Dla zaawansowanych
+
+### Plik `snap.cfg`
 
 ```ini
 [performance]
-workers = 1              # Liczba wątków (crawl mode)
-block_analytics = true  # Blokuj analytics/tracking requesty
+workers = 3              # ile stron naraz (4 GB RAM → 1, 8 GB → 2-3, 16 GB → 4-6)
 
 [browser]
-viewport_width = 1440        # Szerokość viewportu
-viewport_height = 900        # Wysokość viewportu
-max_screenshot_height = 15000  # Max wysokość screenshotu w px
+viewport_width  = 1920   # rozdzielczość okna przeglądarki
+viewport_height = 1080
+device_scale_factor = 1  # 1 = zwykły monitor, 1.25 = laptop Windows, 2 = Retina (plik 4x większy)
+max_screenshot_height = 30000
 
 [crawl]
-max_pages = 50            # Domyślny limit stron do odkrycia
+max_pages = 9999         # limit podstron w trybie crawl
 ```
 
-Program szuka `snap.cfg` w kolejności:
-1. Ścieżka podana przez `-c` / `--config`
-2. `./snap.cfg` (bieżący katalog)
-3. `snap.cfg` obok `snap.py`
+### Wszystkie opcje CLI
 
----
+| Opcja | Opis | Domyślnie |
+|---|---|---|
+| `urls` | adresy stron | — |
+| `-f, --file` | plik z listą adresów (`#` = komentarz) | — |
+| `-o, --output` | folder na wyniki | `./results` |
+| `--mode` | `full`, `screenshots`, `crawl`, `clean-full`, `clean-screenshots`, `clean-crawl` | `full` |
+| `--max-pages` | limit podstron w crawl | z `snap.cfg` |
+| `--keep-folders` | nie usuwaj folderów po spakowaniu | wyłączone |
+| `--config` | inny plik konfiguracyjny | `snap.cfg` |
 
-## Plik z listą URL-i
+### Co skrypt robi z każdą stroną
 
-Format pliku (jeden URL na linię, `#` to komentarz):
+1. Otwiera ją w pełnym Chromium (1920×1080, User-Agent zwykłego Chrome na Windows).
+2. Akceptuje/zamyka cookies i popupy (wiele języków, Cookiebot, OneTrust, Webwave i inne).
+3. Wyłącza animacje, preloadery, fullpage.js, Locomotive Scroll i Pixfort.
+4. Przewija stronę, żeby załadować leniwe obrazki (lazy load, Webwave `data-ww_rwd`).
+5. Renderuje slidery (Slider Revolution, Swiper, Slick, Owl).
+6. Czeka na obrazki i fonty.
+7. (tryb full) Zapisuje HTML i wszystkie zasoby z podmienionymi ścieżkami na lokalne.
+8. Zdejmuje blokady scrolla i rozwija wewnętrzne kontenery, żeby screen objął całą stronę.
+9. Robi screenshot całej strony i pakuje wszystko do ZIP.
 
-```
-# Komentarze zaczynające się od # są ignorowane
-
-https://example.com
-https://example.com/o-nas
-https://example.com/kontakt
-
-# https://strona-wylaczona.pl
-```
-
----
-
-## Struktura wyników
-
-### Full / Crawl mode
-
-```
-results/
-├── FULL_2026-06-24_14-30-00_example.com.zip
-│   ├── homepage/
-│   │   ├── index.html
-│   │   ├── screenshot_full.png
-│   │   ├── meta.txt
-│   │   └── assets/
-│   │       ├── style.css
-│   │       ├── script.js
-│   │       ├── logo.png
-│   │       └── font.woff2
-│   └── kontakt/
-│       ├── index.html
-│       ├── screenshot_full.png
-│       ├── meta.txt
-│       └── assets/
-└── snap_2026-06-24_14-30-00.log
-```
-
-### Screenshots mode
+### Pliki w repo
 
 ```
-results/
-├── SCREENSHOTS_2026-06-24_14-30-00_example.com.zip
-│   ├── 2026-06-24_example.com.png
-│   ├── 2026-06-24_example.com_o-nas.png
-│   ├── 2026-06-24_example.com_kontakt.png
-│   └── ...
-└── snap_2026-06-24_14-30-00.log
+snap.py                     # główny skrypt
+snap.cfg                    # ustawienia
+snap_colab_optimized.ipynb  # wersja do Google Colab
+lista_stron.txt             # przykładowa lista adresów
+requirements.txt            # biblioteki Pythona
+install.sh                  # instalator (Linux/Mac)
 ```
 
-### Crawl mode
+### Ograniczenia
 
-```
-results/
-├── CRAWL_2026-06-24_14-30-00_example.com.zip
-│   ├── crawl_pages/
-│   │   ├── example.com/
-│   │   │   ├── index.html
-│   │   │   ├── screenshot_full.png
-│   │   │   └── assets/
-│   │   ├── example.com_o-nas/
-│   │   │   ├── index.html
-│   │   │   ├── screenshot_full.png
-│   │   │   └── assets/
-│   │   └── ...
-│   └── urls_found.txt
-└── snap_2026-06-24_14-30-00.log
-```
-
----
-
-## Co robi snap.py pod maską
-
-1. Otwiera stronę w headless Chromium (1440x900)
-2. Wstrzykuje **init script** — globalny CSS killer animacji + IntersectionObserver hijack + localStorage consent flags
-3. Ustawia cookie consent (żeby nie wyskakiwały bannery)
-4. Nawiguje z `wait_until='networkidle'` (z retry 2x)
-5. Zamyka popupy, modale, cookie bannery
-6. Neutralizuje fullpage scroll (fullpage.js) i Locomotive Scroll
-7. Scroluje stronę (do 30000px) żeby wymusić lazy load
-8. Wymusza ładowanie obrazków leniwych (`data-src`, `data-lazy-src`, `srcset`, `data-lazy-load-src`, `data-lazy-background-image`, `data-bg-image`, `data-ww_rwd`)
-9. Renderuje slidery (Slider Revolution 6, Slider Revolution 7)
-10. Przeklikuje wszystkie slajdy karuzel (Slick, Webwave, Owl, Swiper — 10x)
-11. Wyłącza animacje CSS (AOS, WOW, GSAP, anime.js, Elementor, Divi, Beaver Builder, Pixfort)
-12. Wywołuje `document.getAnimations().finish()` + specyficzne finishery JS
-13. Czeka na załadowanie obrazków (`naturalWidth > 0`, timeout 8s)
-14. Czeka na załadowanie fontów
-15. Konwertuje blob URL-e na base64
-16. Zapisuje HTML z przepisanymi ścieżkami do lokalnych assets
-17. Przepisuje CSS (`url()`, `@import`) na lokalne ścieżki
-18. Dohandlowuje brakujące assets przez requests (w tym fonty z CSS)
-19. Robi full-page screenshot (max 15000px)
-20. Pakuje wszystko do ZIP-a z DEFLATE
-
----
-
-## Co nowego w v4.1
-
-| # | Zmiana |
-|---|--------|
-| A | `add_init_script()` przed nawigacją — globalny CSS killer animacji + IntersectionObserver hijack + localStorage consent flags. Zastępuje większość `_force_*_render` funkcji z v3. |
-| B | Architektura: **jeden browser per wątek** (nie per run). v4.0 używał jednego browsera dla wszystkich wątków — Playwright sync API jest greenlet-bound i crashował przy `ThreadPoolExecutor`. v4.1: każdy wątek tworzy własny `playwright+browser` via `_thread_local`. |
-| C | Rozszerzony lazy loader: `data-lazy-load-src`, `data-lazy-background-image`, `data-background-image`, `data-bg-image` + parsowanie `data-ww_rwd` (Webwave). |
-| D | `_finish_all_animations`: `document.getAnimations().finish()` + GSAP + WOW + AOS + anime.js w jednej funkcji. |
-| E | Lepszy cookie killer: Webwave `cookiePopup`, localStorage flags, "Allow All" button auto-click w wielu językach (PL, EN, DE, FR, ES, IT i inne). |
-| F | `_wait_for_images`: sprawdza `naturalWidth > 0` (nie tylko `complete`). |
-| G | Slider walkthrough: przeklikuje wszystkie dots dla Slick / Webwave / Owl / Swiper. |
-| H | Route blocking: analytics/tracking blokowane dla szybkości. |
-| I | Diagnostyka na końcu: zlicza puste/niewidoczne elementy → log. |
-| J | `max_screenshot_height` przeniesione do `_CFG` (thread-safe). |
-
----
-
-## Ograniczenia
-
-- Strony z **anti-bot protection** (Cloudflare challenge, reCAPTCHA Enterprise) mogą nie działać
-- Strony wymagające **logowania** — można ustawić cookie consent ale nie pełną autoryzację
-- **Single Page Apps** z dynamicznym routingiem — crawl mode może nie znaleźć wszystkich stron
-- **Infinite scroll** z bardzo dużą ilością treści — scroll limit 30000px
-
-## Wymagania systemowe
-
-- Linux / macOS / Windows (WSL)
-- Python 3.8+
-- ~200MB RAM na stronę (Chromium headless)
-- Chromium ~400MB na dysku
-
-## Struktura repozytorium
-
-```
-webscraper/
-├── snap.py            # Główny skrypt
-├── snap.cfg           # Konfiguracja domyślna
-├── install.sh         # Skrypt instalacyjny
-├── requirements.txt   # Zależności Pythona
-├── LICENSE            # Licencja MIT
-└── README.md          # Ten plik
-```
-
-## Licencja
-
-MIT — zobacz plik [LICENSE](LICENSE)
+- Strony z ochroną anty-bot (Cloudflare challenge, reCAPTCHA) mogą nie działać.
+- Strony za logowaniem: nie.
+- Aplikacje SPA: crawl może nie znaleźć wszystkich podstron.
