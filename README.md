@@ -76,47 +76,63 @@ Kliknij ▶ przy komórce **„4. Wyniki”**. Przeglądarka pobierze pliki ZIP.
 
 ---
 
-## 🔵 Sposób 2: na własnym komputerze
+## 🐧 Sposób 2: Linux Mint (20, 21, 22) / Ubuntu
 
-### Instalacja (raz)
+### Instalacja (tylko raz)
 
-1. Zainstaluj **Python** ze strony https://www.python.org/downloads/.
-   Na Windowsie podczas instalacji **zaznacz ☑ „Add Python to PATH”**.
-2. Pobierz ten projekt: zielony przycisk **Code → Download ZIP** na GitHubie, potem rozpakuj.
-3. Otwórz terminal w rozpakowanym folderze:
-   - **Windows:** wejdź do folderu, kliknij w pasek adresu u góry, wpisz `cmd`, Enter.
-   - **Mac:** kliknij folder prawym → **Nowy terminal w folderze**.
-4. Wpisz (i poczekaj, aż skończy):
-   ```
-   pip install -r requirements.txt
-   python -m playwright install chromium
-   ```
+**1. Otwórz terminal**: `Ctrl + Alt + T` (albo Menu → Terminal).
 
-### Użycie
+**2. Skopiuj i wklej to** (w terminalu wklejasz przez `Ctrl + Shift + V`), potem Enter:
 
-Najprościej: wpisz
-
-```
-python snap.py
+```bash
+sudo apt install -y git && git clone https://github.com/mrmatek11/webscraper.git ~/webscraper && cd ~/webscraper && bash install.sh
 ```
 
-i odpowiadaj na pytania (wybór trybu → skąd adresy → gdzie zapisać).
+- Zapyta o **hasło**: wpisz hasło do swojego konta i Enter. **Podczas wpisywania nic się nie wyświetla, to normalne.**
+- Instalacja trwa ok. 2–5 minut. Na końcu pojawi się **✅ Gotowe!**
+- Program jest w folderze **`webscraper`** w Twoim katalogu domowym.
 
-Albo jednym poleceniem:
+### Uruchamianie
 
+**Opcja A: klikanie (najprościej)**
+
+1. Otwórz folder `webscraper` w menedżerze plików.
+2. Kliknij dwa razy **`snap.sh`** i wybierz **„Uruchom w terminalu”**.
+3. Odpowiadaj na pytania, wpisując numer i Enter:
+   - tryb: `2` = same screeny, `1` = pełny backup, `3` = crawl (sam szuka podstron), `4` = to samo z mocniejszym zamykaniem popupów
+   - skąd adresy: `1` = z pliku `lista_stron.txt` (potem jeszcze raz Enter), `2` = wpisujesz ręcznie (po ostatnim adresie wciśnij Enter na pustej linii)
+   - folder wyników: po prostu Enter
+4. Wyniki (ZIP) są w folderze **`webscraper/results`**.
+
+> Jeśli po dwukliku otwiera się edytor tekstu zamiast pytania: kliknij `snap.sh` prawym → **Właściwości → Uprawnienia** → zaznacz ☑ **„Zezwól na uruchamianie pliku jako programu”**.
+
+**Opcja B: z terminala**
+
+```bash
+cd ~/webscraper
+
+# jedna strona, same screeny
+./snap.sh https://tono.com.pl --mode screenshots
+
+# wiele stron z pliku (otwórz lista_stron.txt, wpisz adresy, każdy w nowej linii)
+./snap.sh -f lista_stron.txt --mode screenshots
+
+# cała strona ze wszystkimi podstronami
+./snap.sh https://tono.com.pl --mode crawl
 ```
-python snap.py https://tono.com.pl --mode screenshots
+
+### Aktualizacja do najnowszej wersji
+
+```bash
+cd ~/webscraper && git pull
 ```
 
-Wiele stron naraz: wpisz adresy do pliku `lista_stron.txt` (jeden w linii) i:
+(Jeśli zmienił się plik `requirements.txt`, uruchom jeszcze raz `bash install.sh`.)
 
-```
-python snap.py -f lista_stron.txt --mode screenshots
-```
+### Windows / Mac
 
-Gotowe pliki ZIP są w folderze **`results`**.
-
-> Na Macu/Linuksie zamiast `python` może być potrzebne `python3`.
+Użyj Google Colab (Sposób 1). Alternatywa: zainstaluj Pythona z python.org (na Windowsie zaznacz ☑ „Add Python to PATH”),
+a potem w folderze projektu: `pip install -r requirements.txt`, `python -m playwright install chromium`, `python snap.py`.
 
 ---
 
@@ -139,6 +155,9 @@ Kopię strony otwierasz, klikając dwa razy `index.html` w rozpakowanym folderze
 | Na screenie wisi baner cookies / popup | Użyj trybu `clean-screenshots` albo `clean-full` |
 | Screen jest ucięty na dole | Zwiększ `MAX_SCREENSHOT_HEIGHT` (Colab) albo `max_screenshot_height` w `snap.cfg` |
 | Colab: `ModuleNotFoundError` / „No module named snap” | Uruchom ponownie kroki 1 i 2 |
+| Linux: `./snap.sh: Brak uprawnień` / `Permission denied` | Wpisz `chmod +x ~/webscraper/snap.sh` |
+| Linux: „Brak instalacji — najpierw uruchom install.sh” | `cd ~/webscraper && bash install.sh` |
+| Linux: błąd przy `apt` / „Could not get lock” | Zamknij Menedżera aktualizacji, poczekaj minutę i spróbuj ponownie |
 | Colab się zawiesza / „Your session crashed” | Zmniejsz `WORKERS` do 1–2 |
 | Brakuje jakiegoś elementu na screenie | Zapisz adres strony i zgłoś, a my to poprawimy |
 | Strona w ogóle się nie otwiera (Cloudflare, logowanie) | Tego narzędzie nie obejdzie |
@@ -195,7 +214,8 @@ snap.cfg                    # ustawienia
 snap_colab_optimized.ipynb  # wersja do Google Colab
 lista_stron.txt             # przykładowa lista adresów
 requirements.txt            # biblioteki Pythona
-install.sh                  # instalator (Linux/Mac)
+install.sh                  # instalator (Linux Mint / Ubuntu)
+snap.sh                     # uruchamianie na Linuksie (po install.sh)
 ```
 
 ### Ograniczenia

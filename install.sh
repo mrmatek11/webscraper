@@ -1,40 +1,55 @@
 #!/usr/bin/env bash
+# Instalator snap.py dla Linux Mint 20/21/22 (i Ubuntu 20.04+).
+# Uruchom w folderze projektu:  bash install.sh
 set -e
 
-echo ""
-echo "  snap.py — installer"
-echo "  ───────────────────"
-echo ""
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$DIR"
 
-PYTHON=""
-for cmd in python3 python; do
-    if command -v "$cmd" &>/dev/null; then
-        PYTHON="$cmd"
-        break
-    fi
-done
-
-if [ -z "$PYTHON" ]; then
-    echo "  [!] Python 3 not found. Install Python 3.8+ first."
-    exit 1
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
 fi
 
-PYVER=$($PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-echo "  Python: $PYTHON ($PYVER)"
+echo ""
+echo "  snap.py — instalator"
+echo "  ────────────────────"
+echo "  (za chwilę system może zapytać o hasło — to hasło do Twojego konta)"
+echo ""
+
+echo "  [1/5] Pakiety systemowe (Python, venv)..."
+$SUDO apt-get update -qq
+$SUDO apt-get install -y -qq python3 python3-venv python3-pip > /dev/null
+
+echo "  [2/5] Środowisko Pythona (.venv) + biblioteki..."
+python3 -m venv .venv
+.venv/bin/python -m pip install --quiet --upgrade pip
+.venv/bin/python -m pip install --quiet -r requirements.txt
+
+echo "  [3/5] Przeglądarka Chromium (~150 MB)..."
+$SUDO .venv/bin/python -m playwright install-deps chromium > /dev/null
+.venv/bin/python -m playwright install chromium
+
+echo "  [4/5] Fonty jak na Windowsie (Arial, Verdana...) + emoji..."
+$SUDO apt-get install -y -qq fonts-liberation fonts-noto-color-emoji > /dev/null 2>&1 || true
+# Fonty Microsoftu pobierają się z internetu przy instalacji pakietu. Jeśli się
+# nie uda, usuwamy pakiet — inaczej zostaje w połowie i blokuje apt.
+echo "ttf-mscorefonts-installer msttcorefonts/accept-mscorefonts-eula select true" | $SUDO debconf-set-selections
+if ! $SUDO apt-get install -y -qq ttf-mscorefonts-installer > /dev/null 2>&1; then
+    $SUDO apt-get remove --purge -y -qq ttf-mscorefonts-installer > /dev/null 2>&1 || true
+    echo "        (fonty Microsoftu się nie zainstalowały — to nie przeszkadza w działaniu)"
+fi
+
+echo "  [5/5] Skrót startowy..."
+chmod +x snap.sh
 
 echo ""
-echo "  [1/3] Installing pip dependencies..."
-$PYTHON -m pip install --quiet --upgrade pip
-$PYTHON -m pip install --quiet -r requirements.txt
-
-echo "  [2/3] Installing Playwright browsers..."
-$PYTHON -m playwright install chromium
-
-echo "  [3/3] Done!"
+echo "  ✅ Gotowe!"
 echo ""
-echo "  Usage:"
-echo "    $PYTHON snap.py https://example.com"
-echo "    $PYTHON snap.py https://example.com --mode screenshots"
-echo "    $PYTHON snap.py https://example.com --mode crawl --max-pages 50"
-echo "    $PYTHON snap.py -f lista_stron.txt --mode full -o ./results"
+echo "  Uruchamianie:"
+echo "    ./snap.sh                                          (menu z pytaniami)"
+echo "    ./snap.sh https://example.com --mode screenshots"
+echo "    ./snap.sh -f lista_stron.txt --mode screenshots"
+echo ""
+echo "  Wyniki (pliki ZIP) lądują w folderze: $DIR/results"
 echo ""
