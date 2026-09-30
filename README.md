@@ -22,7 +22,7 @@ Gotowe do użycia przez webmasterów — szybki backup przed zmianami na stronie
 ## Funkcje
 
 - **Full backup** — zapisuje kompletną stronę: HTML, CSS, JS, obrazki, fonty, screenshot
-- **Screenshots only** — szybkie screenshoty całych stron (1440px wide)
+- **Screenshots only** — szybkie screenshoty całych stron (domyślnie 1920×1080, jak monitor Full HD)
 - **Crawl mode** — automatycznie odkrywa wszystkie podstrony z `sitemap.xml` + linki wewnętrzne
 - **Slider Revolution support** — obsługa SR7 i RevSlider 6 (wymusza renderowanie tła)
 - **Lazy load bypass** — wymusza ładowanie obrazków leniwych (`data-src`, `data-lazy`, `srcset`, `data-lazy-load-src`, `data-lazy-background-image`, `data-bg-image`)
@@ -157,8 +157,9 @@ workers = 1              # Liczba wątków (crawl mode)
 block_analytics = true  # Blokuj analytics/tracking requesty
 
 [browser]
-viewport_width = 1440        # Szerokość viewportu
-viewport_height = 900        # Wysokość viewportu
+viewport_width = 1920        # Szerokość viewportu
+viewport_height = 1080       # Wysokość viewportu
+device_scale_factor = 1      # 1 = zwykły monitor, 1.25 = laptop Windows, 2 = Retina
 max_screenshot_height = 15000  # Max wysokość screenshotu w px
 
 [crawl]
@@ -247,7 +248,7 @@ results/
 
 ## Co robi snap.py pod maską
 
-1. Otwiera stronę w headless Chromium (1440x900)
+1. Otwiera stronę w pełnym Chromium w trybie headless (1920x1080), z User-Agentem zgodnym z wersją przeglądarki
 2. Wstrzykuje **init script** — globalny CSS killer animacji + IntersectionObserver hijack + localStorage consent flags
 3. Ustawia cookie consent (żeby nie wyskakiwały bannery)
 4. Nawiguje z `wait_until='networkidle'` (z retry 2x)
@@ -286,6 +287,14 @@ results/
 | J | `max_screenshot_height` przeniesione do `_CFG` (thread-safe). |
 
 ---
+
+## Google Colab
+
+Notebook [`snap_colab_optimized.ipynb`](snap_colab_optimized.ipynb) odpala `snap.py` w Colabie, bez instalowania czegokolwiek lokalnie.
+Pobiera aktualny `snap.py` z GitHuba, więc poprawki w repo działają w nim od razu. Ma formularz z ustawieniami
+(tryb, viewport, skala, etykieta `przed`/`po`) i opcję zapisu wyników na Google Drive.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mrmatek11/webscraper/blob/main/snap_colab_optimized.ipynb)
 
 ## Ograniczenia
 
