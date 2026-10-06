@@ -85,7 +85,7 @@ Kliknij ▶ przy komórce **„4. Wyniki”**. Przeglądarka pobierze pliki ZIP.
 **2. Skopiuj i wklej to** (w terminalu wklejasz przez `Ctrl + Shift + V`), potem Enter:
 
 ```bash
-sudo apt install -y git && git clone https://github.com/mrmatek11/webscraper.git ~/webscraper && cd ~/webscraper && bash install.sh
+command -v git > /dev/null || sudo apt install -y git; (git -C ~/webscraper pull 2>/dev/null || git clone https://github.com/mrmatek11/webscraper.git ~/webscraper) && cd ~/webscraper && bash install.sh
 ```
 
 - Zapyta o **hasło**: wpisz hasło do swojego konta i Enter. **Podczas wpisywania nic się nie wyświetla, to normalne.**
@@ -157,7 +157,7 @@ Kopię strony otwierasz, klikając dwa razy `index.html` w rozpakowanym folderze
 | Colab: `ModuleNotFoundError` / „No module named snap” | Uruchom ponownie kroki 1 i 2 |
 | Linux: `./snap.sh: Brak uprawnień` / `Permission denied` | Wpisz `chmod +x ~/webscraper/snap.sh` |
 | Linux: „Brak instalacji — najpierw uruchom install.sh” | `cd ~/webscraper && bash install.sh` |
-| Linux: błąd przy `apt` / „Could not get lock” | Zamknij Menedżera aktualizacji, poczekaj minutę i spróbuj ponownie |
+| Linux: błąd przy `apt` / „Could not get lock” | Instalator sam czeka do 2 min, a potem wypisze, jaki proces blokuje apt i co wpisać |
 | Linux: `Playwright does not support chromium on ubuntu20.04` | Mint 20: zrób `cd ~/webscraper && git pull && bash install.sh` (nowy instalator sam dobiera wersję) |
 | Linux: ostrzeżenia `NO_PUBKEY` / `GPG error` (np. Spotify) przy instalacji | Nie dotyczą snap.py, można je zignorować |
 | Colab się zawiesza / „Your session crashed” | Zmniejsz `WORKERS` do 1–2 |

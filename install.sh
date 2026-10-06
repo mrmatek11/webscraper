@@ -11,6 +11,30 @@ if [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
 fi
 
+# Czeka, aż apt będzie wolny (Menedżer aktualizacji, automatyczne aktualizacje
+# albo zawieszona poprzednia instalacja). Po 2 minutach mówi, co zrobić.
+wait_for_apt() {
+    command -v fuser > /dev/null || return 0
+    local i pids
+    for i in $(seq 1 60); do
+        pids=$($SUDO fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock 2>/dev/null | xargs || true)
+        [ -z "$pids" ] && return 0
+        [ "$i" -eq 1 ] && echo "        (apt jest zajęty przez inny proces — czekam do 2 minut...)"
+        sleep 2
+    done
+    echo ""
+    echo "  ❌ apt (instalator pakietów) jest zajęty przez:"
+    ps -o pid=,args= -p "$(echo $pids | tr ' ' ',')" 2>/dev/null | sed 's/^/       /'
+    echo ""
+    echo "  • Jeśli to Menedżer aktualizacji — poczekaj, aż skończy, albo go zamknij."
+    echo "  • Jeśli to zawieszona poprzednia instalacja (np. ttf-mscorefonts-installer), wpisz:"
+    echo "        sudo kill $pids"
+    echo "        sudo dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer"
+    echo "        sudo dpkg --configure -a"
+    echo "    i uruchom ponownie:  bash install.sh"
+    exit 1
+}
+
 echo ""
 echo "  snap.py — instalator"
 echo "  ────────────────────"
@@ -18,6 +42,7 @@ echo "  (za chwilę system może zapytać o hasło — to hasło do Twojego kont
 echo ""
 
 echo "  [1/5] Pakiety systemowe (Python, venv)..."
+wait_for_apt
 # błędy obcych repozytoriów (np. wygasły klucz Spotify/Chrome) nie mogą przerwać instalacji
 $SUDO apt-get update -qq || true
 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-venv python3-pip > /dev/null
@@ -35,10 +60,12 @@ if [ "${UBUNTU_CODENAME:-$VERSION_CODENAME}" = "focal" ]; then
 fi
 
 echo "  [3/5] Przeglądarka Chromium (~150 MB)..."
+wait_for_apt
 $SUDO .venv/bin/python -m playwright install-deps chromium > /dev/null
 .venv/bin/python -m playwright install chromium
 
 echo "  [4/5] Fonty jak na Windowsie (Arial, Verdana...) + emoji..."
+wait_for_apt
 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fonts-liberation fonts-noto-color-emoji > /dev/null 2>&1 || true
 # Fonty Microsoftu pobierają się z internetu przy instalacji pakietu. Jeśli się
 # nie uda, usuwamy pakiet — inaczej zostaje w połowie i blokuje apt.
