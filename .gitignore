@@ -92,4 +92,7 @@ coverage.xml
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```
+
+# snap.py
+install.log
+results/

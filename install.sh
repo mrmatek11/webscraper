@@ -6,9 +6,19 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+# Szczegółowy log (każda komenda z godziną) — przy problemie wystarczy wysłać install.log
+exec 19> "$DIR/install.log"
+BASH_XTRACEFD=19
+PS4='+ $(date +%T) '
+set -x
+
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
     SUDO="sudo"
+    # Hasło raz na początku i podtrzymywanie przez całą instalację — inaczej sudo
+    # uruchomione pod `timeout` może po cichu stanąć, czekając na hasło w tle.
+    sudo -v
+    ( while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) &
 fi
 
 # Czeka, aż apt będzie wolny (Menedżer aktualizacji, automatyczne aktualizacje
@@ -38,7 +48,6 @@ wait_for_apt() {
 echo ""
 echo "  snap.py — instalator"
 echo "  ────────────────────"
-echo "  (za chwilę system może zapytać o hasło — to hasło do Twojego konta)"
 echo ""
 
 # Sprzątanie po starszych wersjach instalatora. Pakiet ttf-mscorefonts-installer
@@ -59,7 +68,7 @@ cleanup_msfonts() {
     $SUDO dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer > /dev/null 2>&1 || true
     $SUDO rm -f /var/lib/update-notifier/package-data-downloads/ttf-mscorefonts-installer* 2>/dev/null || true
     $SUDO pkill -f "[p]ackage-data-downloader" 2>/dev/null || true
-    timeout 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
+    timeout --foreground 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
 }
 
 echo "  [1/5] Pakiety systemowe (Python, venv)..."
@@ -99,7 +108,8 @@ for pkg in fonts-liberation fonts-liberation2 fonts-crosextra-carlito fonts-cros
 done
 if [ -n "$missing" ]; then
     for pkg in $missing; do
-        timeout 300 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" > /dev/null 2>&1 || true
+        echo "        - $pkg"
+        timeout --foreground 300 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" > /dev/null 2>&1 || true
     done
     fc-cache -f > /dev/null 2>&1 || true
 else
