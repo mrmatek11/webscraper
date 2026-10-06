@@ -2553,15 +2553,57 @@ def run(urls: list, base_output: Path, mode: str, keep_folders: bool = False):
         print("[!] Playwright not installed. pip install playwright && playwright install chromium")
         sys.exit(1)
 
+    ok, msg = check_browser()
+    if not ok:
+        print(msg)
+        logging.error(msg)
+        return
+
+    before = set(base_output.glob('*.zip'))
     _run_inner(normalized, base_output, mode, keep_folders)
 
     print("\n" + "─" * 50)
     print("  RESULTS")
     print("─" * 50)
-    for z in sorted(base_output.glob('*.zip')):
+    new_zips = sorted(set(base_output.glob('*.zip')) - before)
+    for z in new_zips:
         mb = z.stat().st_size / (1024 * 1024)
         print(f"  {z.name}  ({mb:.1f} MB)")
+    if not new_zips:
+        print("  (brak wyników — żadna strona się nie udała, szczegóły w logu)")
     print()
+
+
+BROWSER_MISSING_HELP = """
+  [!] Przeglądarka (Chromium) nie startuje:
+      {err}
+
+  Jak naprawić:
+    • Linux:  cd ~/webscraper && git pull && bash install.sh
+    • Colab:  uruchom ponownie komórkę „1. Instalacja”
+    • ręcznie: python -m playwright install --with-deps chromium
+"""
+
+
+def check_browser() -> Tuple[bool, str]:
+    """Próbne uruchomienie przeglądarki (w osobnym wątku — działa też w Colabie)."""
+    result = {}
+
+    def _try():
+        try:
+            _get_thread_browser()
+            result['version'] = _thread_local.browser.version
+        except BaseException as e:  # noqa: BLE001 — sys.exit z _get_thread_browser też łapiemy
+            result['err'] = str(e).strip().splitlines()[0] if str(e).strip() else repr(e)
+        finally:
+            _close_thread_browser()
+
+    t = threading.Thread(target=_try)
+    t.start()
+    t.join()
+    if 'err' in result:
+        return False, BROWSER_MISSING_HELP.format(err=result['err'])
+    return True, f"Chromium {result['version']}"
 
 
 def _run_inner(normalized, base_output, mode, keep_folders):
@@ -2638,6 +2680,8 @@ def _run_inner(normalized, base_output, mode, keep_folders):
                 try:
                     f.result()
                 except Exception as exc:
+                    with shots_lock:
+                        fail_count_ref[0] += 1
                     _safe_print(f"   [ERR] {futures[f]}: {exc}")
                     logging.error(f"[ERR] {futures[f]}: {exc}")
 
@@ -2706,7 +2750,11 @@ def _run_inner(normalized, base_output, mode, keep_folders):
                     _safe_print(f"   [ERR] {futures[f]}: {exc}")
                     logging.error(f"[ERR] {futures[f]}: {exc}")
 
-        pack_dir_to_zip(domain_tmp, zip_path)
+        has_results = any(f.name in ('index.html', 'screenshot_full.png') for f in domain_tmp.rglob('*'))
+        if has_results:
+            pack_dir_to_zip(domain_tmp, zip_path)
+        else:
+            _safe_print(f"  [!] {domain}: żadna strona się nie udała — nie tworzę ZIP-a")
         if not keep_folders:
             shutil.rmtree(domain_tmp)
 
@@ -2834,9 +2882,15 @@ def main():
         parser.add_argument('--keep-folders', action='store_true')
         parser.add_argument('--max-pages', type=int, default=None)
         parser.add_argument('--config', default=None)
+        parser.add_argument('--check', action='store_true',
+                            help='tylko sprawdź, czy przeglądarka startuje')
         args = parser.parse_args()
 
         load_config(args.config)
+        if args.check:
+            ok, msg = check_browser()
+            print(f"  ✅ {msg} — działa" if ok else msg)
+            sys.exit(0 if ok else 1)
         if args.max_pages is not None:
             _CFG['max_pages'] = args.max_pages
         urls = list(args.urls)

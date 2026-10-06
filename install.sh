@@ -48,8 +48,13 @@ if ! $SUDO apt-get install -y -qq ttf-mscorefonts-installer > /dev/null 2>&1; th
     echo "        (fonty Microsoftu się nie zainstalowały — to nie przeszkadza w działaniu)"
 fi
 
-echo "  [5/5] Skrót startowy..."
+echo "  [5/5] Test przeglądarki..."
 chmod +x snap.sh
+if ! .venv/bin/python snap.py --check; then
+    echo ""
+    echo "  ❌ Instalacja nie skończyła się poprawnie — skopiuj komunikat powyżej i zgłoś."
+    exit 1
+fi
 
 echo ""
 echo "  ✅ Gotowe!"
