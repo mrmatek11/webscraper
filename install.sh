@@ -20,7 +20,7 @@ echo ""
 echo "  [1/5] Pakiety systemowe (Python, venv)..."
 # błędy obcych repozytoriów (np. wygasły klucz Spotify/Chrome) nie mogą przerwać instalacji
 $SUDO apt-get update -qq || true
-$SUDO apt-get install -y -qq python3 python3-venv python3-pip > /dev/null
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-venv python3-pip > /dev/null
 
 echo "  [2/5] Środowisko Pythona (.venv) + biblioteki..."
 python3 -m venv .venv
@@ -39,13 +39,16 @@ $SUDO .venv/bin/python -m playwright install-deps chromium > /dev/null
 .venv/bin/python -m playwright install chromium
 
 echo "  [4/5] Fonty jak na Windowsie (Arial, Verdana...) + emoji..."
-$SUDO apt-get install -y -qq fonts-liberation fonts-noto-color-emoji > /dev/null 2>&1 || true
+$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fonts-liberation fonts-noto-color-emoji > /dev/null 2>&1 || true
 # Fonty Microsoftu pobierają się z internetu przy instalacji pakietu. Jeśli się
 # nie uda, usuwamy pakiet — inaczej zostaje w połowie i blokuje apt.
+# Limit czasu: pobieranie z SourceForge potrafi wisieć bez końca.
 echo "ttf-mscorefonts-installer msttcorefonts/accept-mscorefonts-eula select true" | $SUDO debconf-set-selections
-if ! $SUDO apt-get install -y -qq ttf-mscorefonts-installer > /dev/null 2>&1; then
-    $SUDO apt-get remove --purge -y -qq ttf-mscorefonts-installer > /dev/null 2>&1 || true
-    echo "        (fonty Microsoftu się nie zainstalowały — to nie przeszkadza w działaniu)"
+echo "        (fonty Microsoftu — max 3 minuty, potem pomijam)"
+if ! timeout 180 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ttf-mscorefonts-installer > /dev/null 2>&1; then
+    $SUDO dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer > /dev/null 2>&1 || true
+    timeout 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
+    echo "        (fonty Microsoftu pominięte — to nie przeszkadza w działaniu)"
 fi
 
 echo "  [5/5] Test przeglądarki..."
