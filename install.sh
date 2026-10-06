@@ -41,7 +41,22 @@ echo "  ────────────────────"
 echo "  (za chwilę system może zapytać o hasło — to hasło do Twojego konta)"
 echo ""
 
+# Sprzątanie po starszych wersjach instalatora: pakiet z fontami Microsoftu
+# pobiera je z SourceForge w trakcie instalacji i potrafi zawisnąć na zawsze,
+# a niedokończony blokuje apt (każde kolejne apt-get próbuje go dokończyć).
+cleanup_msfonts() {
+    if dpkg -s ttf-mscorefonts-installer > /dev/null 2>&1 && \
+       ! dpkg -s ttf-mscorefonts-installer 2>/dev/null | grep -q "^Status: install ok installed"; then
+        echo "        (sprzątam niedokończoną instalację fontów Microsoftu...)"
+        $SUDO pkill -f "[u]pdate-ms-fonts|[m]sttcorefonts|[p]ackage-data-downloader" 2>/dev/null || true
+        sleep 3
+        $SUDO dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer > /dev/null 2>&1 || true
+        timeout 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
+    fi
+}
+
 echo "  [1/5] Pakiety systemowe (Python, venv)..."
+cleanup_msfonts
 wait_for_apt
 # błędy obcych repozytoriów (np. wygasły klucz Spotify/Chrome) nie mogą przerwać instalacji
 $SUDO apt-get update -qq || true
@@ -64,19 +79,15 @@ wait_for_apt
 $SUDO .venv/bin/python -m playwright install-deps chromium > /dev/null
 .venv/bin/python -m playwright install chromium
 
-echo "  [4/5] Fonty jak na Windowsie (Arial, Verdana...) + emoji..."
+echo "  [4/5] Fonty (zamienniki Arial/Times/Calibri o identycznych wymiarach) + emoji..."
 wait_for_apt
-$SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fonts-liberation fonts-noto-color-emoji > /dev/null 2>&1 || true
-# Fonty Microsoftu pobierają się z internetu przy instalacji pakietu. Jeśli się
-# nie uda, usuwamy pakiet — inaczej zostaje w połowie i blokuje apt.
-# Limit czasu: pobieranie z SourceForge potrafi wisieć bez końca.
-echo "ttf-mscorefonts-installer msttcorefonts/accept-mscorefonts-eula select true" | $SUDO debconf-set-selections
-echo "        (fonty Microsoftu — max 3 minuty, potem pomijam)"
-if ! timeout 180 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ttf-mscorefonts-installer > /dev/null 2>&1; then
-    $SUDO dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer > /dev/null 2>&1 || true
-    timeout 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
-    echo "        (fonty Microsoftu pominięte — to nie przeszkadza w działaniu)"
-fi
+# Darmowe odpowiedniki fontów Windows: Liberation = Arial/Times New Roman/Courier New,
+# Carlito = Calibri, Caladea = Cambria. Zwykłe paczki, nic nie pobierają przy instalacji.
+for pkg in fonts-liberation fonts-liberation2 fonts-crosextra-carlito fonts-crosextra-caladea \
+           fonts-dejavu-core fonts-noto-color-emoji; do
+    timeout 300 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" > /dev/null 2>&1 || true
+done
+fc-cache -f > /dev/null 2>&1 || true
 
 echo "  [5/5] Test przeglądarki..."
 chmod +x snap.sh
