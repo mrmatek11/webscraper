@@ -41,18 +41,25 @@ echo "  ────────────────────"
 echo "  (za chwilę system może zapytać o hasło — to hasło do Twojego konta)"
 echo ""
 
-# Sprzątanie po starszych wersjach instalatora: pakiet z fontami Microsoftu
-# pobiera je z SourceForge w trakcie instalacji i potrafi zawisnąć na zawsze,
-# a niedokończony blokuje apt (każde kolejne apt-get próbuje go dokończyć).
+# Sprzątanie po starszych wersjach instalatora. Pakiet ttf-mscorefonts-installer
+# nie ma fontów w środku — na Ubuntu pobiera je z SourceForge mechanizm
+# update-notifier (package-data-downloader), odpalany jako trigger przy KAŻDEJ
+# kolejnej instalacji czegokolwiek przez apt. Jeśli pobieranie się nie udało,
+# każde apt-get install potrafi zawisnąć na zawsze. Jeśli fontów MS faktycznie
+# nie ma na dysku, pakiet jest bezużyteczny — usuwamy go.
 cleanup_msfonts() {
-    if dpkg -s ttf-mscorefonts-installer > /dev/null 2>&1 && \
-       ! dpkg -s ttf-mscorefonts-installer 2>/dev/null | grep -q "^Status: install ok installed"; then
-        echo "        (sprzątam niedokończoną instalację fontów Microsoftu...)"
-        $SUDO pkill -f "[u]pdate-ms-fonts|[m]sttcorefonts|[p]ackage-data-downloader" 2>/dev/null || true
-        sleep 3
-        $SUDO dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer > /dev/null 2>&1 || true
-        timeout 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
+    dpkg -s ttf-mscorefonts-installer > /dev/null 2>&1 || return 0
+    if dpkg -s ttf-mscorefonts-installer 2>/dev/null | grep -q "^Status: install ok installed" && \
+       ls /usr/share/fonts/truetype/msttcorefonts/ 2>/dev/null | grep -qi "^arial\.ttf$"; then
+        return 0   # zainstalowany i fonty są — wszystko w porządku
     fi
+    echo "        (usuwam niedziałający pakiet fontów Microsoftu — blokował apt...)"
+    $SUDO pkill -f "[u]pdate-ms-fonts|[m]sttcorefonts|[p]ackage-data-downloader" 2>/dev/null || true
+    sleep 3
+    $SUDO dpkg --purge --force-remove-reinstreq ttf-mscorefonts-installer > /dev/null 2>&1 || true
+    $SUDO rm -f /var/lib/update-notifier/package-data-downloads/ttf-mscorefonts-installer* 2>/dev/null || true
+    $SUDO pkill -f "[p]ackage-data-downloader" 2>/dev/null || true
+    timeout 120 $SUDO env DEBIAN_FRONTEND=noninteractive dpkg --configure -a > /dev/null 2>&1 || true
 }
 
 echo "  [1/5] Pakiety systemowe (Python, venv)..."
@@ -83,11 +90,21 @@ echo "  [4/5] Fonty (zamienniki Arial/Times/Calibri o identycznych wymiarach) + 
 wait_for_apt
 # Darmowe odpowiedniki fontów Windows: Liberation = Arial/Times New Roman/Courier New,
 # Carlito = Calibri, Caladea = Cambria. Zwykłe paczki, nic nie pobierają przy instalacji.
+# Instalujemy tylko brakujące — jeśli wszystko jest, apt w ogóle się nie odpala.
+cleanup_msfonts
+missing=""
 for pkg in fonts-liberation fonts-liberation2 fonts-crosextra-carlito fonts-crosextra-caladea \
            fonts-dejavu-core fonts-noto-color-emoji; do
-    timeout 300 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" > /dev/null 2>&1 || true
+    dpkg -s "$pkg" 2>/dev/null | grep -q "^Status: install ok installed" || missing="$missing $pkg"
 done
-fc-cache -f > /dev/null 2>&1 || true
+if [ -n "$missing" ]; then
+    for pkg in $missing; do
+        timeout 300 $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" > /dev/null 2>&1 || true
+    done
+    fc-cache -f > /dev/null 2>&1 || true
+else
+    echo "        (już zainstalowane)"
+fi
 
 echo "  [5/5] Test przeglądarki..."
 chmod +x snap.sh
