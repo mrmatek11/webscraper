@@ -158,6 +158,8 @@ Kopię strony otwierasz, klikając dwa razy `index.html` w rozpakowanym folderze
 | Linux: `./snap.sh: Brak uprawnień` / `Permission denied` | Wpisz `chmod +x ~/webscraper/snap.sh` |
 | Linux: „Brak instalacji — najpierw uruchom install.sh” | `cd ~/webscraper && bash install.sh` |
 | Linux: błąd przy `apt` / „Could not get lock” | Zamknij Menedżera aktualizacji, poczekaj minutę i spróbuj ponownie |
+| Linux: `Playwright does not support chromium on ubuntu20.04` | Mint 20: zrób `cd ~/webscraper && git pull && bash install.sh` (nowy instalator sam dobiera wersję) |
+| Linux: ostrzeżenia `NO_PUBKEY` / `GPG error` (np. Spotify) przy instalacji | Nie dotyczą snap.py, można je zignorować |
 | Colab się zawiesza / „Your session crashed” | Zmniejsz `WORKERS` do 1–2 |
 | Brakuje jakiegoś elementu na screenie | Zapisz adres strony i zgłoś, a my to poprawimy |
 | Strona w ogóle się nie otwiera (Cloudflare, logowanie) | Tego narzędzie nie obejdzie |
