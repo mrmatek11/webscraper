@@ -40,6 +40,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -424,6 +425,22 @@ SKIP_EXTENSIONS = {
     '.rar', '.gz', '.map', '.less', '.scss',
 }
 
+# Adresy, które nie są stronami do screenshotu (panel WP, API, feedy, koszyk,
+# linki pobierania plików) — crawl je pomija
+_SKIP_URL_RE = re.compile(
+    r'/(?:wp-admin|wp-login\.php|wp-json|wp-content|wp-includes|xmlrpc\.php|wp-cron\.php|'
+    r'cdn-cgi|feed|comments/feed|trackback|cart|koszyk|checkout|my-account|moje-konto)(?:/|$|\?)'
+    r'|[?&](?:replytocom|add-to-cart|download|file|attachment_id|action|share|print)=',
+    re.IGNORECASE
+)
+
+
+def _is_page_url(url: str) -> bool:
+    if Path(urlparse(url).path).suffix.lower() in SKIP_EXTENSIONS:
+        return False
+    return not _SKIP_URL_RE.search(url)
+
+
 def crawl_internal_links(page_url: str, session: requests.Session, max_pages: int = 50,
                          same_domain_only: bool = True) -> list:
     parsed = urlparse(page_url)
@@ -437,7 +454,8 @@ def crawl_internal_links(page_url: str, session: requests.Session, max_pages: in
         return [page_url]
 
     found_urls = {page_url}
-    href_pat = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+    # tylko zwykłe linki <a href> — <link href> to CSS, feedy, xmlrpc.php, oembed itd.
+    href_pat = re.compile(r'<a\s[^>]*?href=["\']([^"\']+)["\']', re.IGNORECASE)
     seen = set()
 
     for m in href_pat.finditer(r.text):
@@ -451,8 +469,7 @@ def crawl_internal_links(page_url: str, session: requests.Session, max_pages: in
             continue
         if fp.netloc != domain:
             continue
-        ext = Path(fp.path).suffix.lower()
-        if ext in SKIP_EXTENSIONS:
+        if not _is_page_url(full):
             continue
         clean = full.rstrip('/')
         if clean not in seen:
@@ -474,7 +491,7 @@ def discover_urls(seed_urls: list, max_pages: int = 50) -> list:
         print(f"      sitemap + crawl: {seed_url}")
         sm_urls = fetch_sitemap_urls(seed_url, session)
         cr_urls = crawl_internal_links(seed_url, session, max_pages=max_pages)
-        combined = [seed_url] + sm_urls + cr_urls
+        combined = [seed_url] + [u for u in sm_urls + cr_urls if _is_page_url(u)]
         print(f"        sitemap: {len(sm_urls)}, crawl: {len(cr_urls)}")
         all_crawl_urls.extend(combined)
     # sitemap zwraca "/o-nas/", crawler "/o-nas" — to ta sama strona (i ten sam folder)
@@ -492,11 +509,13 @@ def get_domain(url: str) -> str:
     return urlparse(url).netloc.replace('www.', '')
 
 def get_subfolder_name(url: str) -> str:
-    path = urlparse(url).path.strip('/')
-    if not path:
-        return 'homepage'
-    name = sanitize_name(path.replace('/', '_'))
-    return name[:80]
+    parsed = urlparse(url)
+    path = parsed.path.strip('/')
+    name = sanitize_name(path.replace('/', '_')) if path else 'homepage'
+    if parsed.query:
+        # index.php?id=1 i index.php?id=2 to różne strony — nie mogą trafić do jednego folderu
+        name = f"{name[:60]}_{sanitize_name(parsed.query)[:30]}_{zlib.crc32(parsed.query.encode()):08x}"
+    return name[:100]
 
 def get_zip_name(domain: str, mode: str = 'full') -> str:
     ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
